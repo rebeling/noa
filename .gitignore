@@ -20,3 +20,5 @@ certs/
 CLAUDE.md
 AGENTS.md
 GEMINI.md
+voices/en_GB-jenny_dioco-medium.onnx.json
+voices/en_US-lessac-medium.onnx.json

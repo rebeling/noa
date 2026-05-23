@@ -325,7 +325,7 @@
     idle:       { base: 66, amp: 4,  speed: .55, waves: 2 },
     listening:  { base: 56, amp: 10, speed: 2.6, waves: 3 },  // tight, alert, quick
     processing: { base: 61, amp: 5,  speed: 1.6, waves: 3 },  // gentle quicker pulse
-    speaking:   { base: 80, amp: 13, speed: 1.0, waves: 2 },  // big loose waves
+    speaking:   { base: 78, amp: 11, speed: .85, waves: 2.4 }, // broad, alive waves
     error:      { base: 60, amp: 15, speed: 4.0, waves: 4 },  // jittery/spiky
     waking:     { base: 42, amp: 0,  speed: 0,   waves: 0 },  // phase 1: shrink
     woke:       { base: 82, amp: 0,  speed: 0,   waves: 0 },  // phase 2: expand
@@ -362,13 +362,15 @@
   function wobblePath(t, level) {
     const tgt = WOBBLE[auraState] || WOBBLE.idle;
     // ease base/amp/speed toward target every frame -> smooth state morph
-    curCfg.base  += (tgt.base  - curCfg.base)  * 0.07;
-    curCfg.amp   += (tgt.amp   - curCfg.amp)   * 0.07;
-    curCfg.speed += (tgt.speed - curCfg.speed) * 0.07;
-    curCfg.waves  = tgt.waves;            // integer phase count — snap, no lerp
+    const morphEase = 0.025;
+    const waveEase = 0.018;
+    curCfg.base  += (tgt.base  - curCfg.base)  * morphEase;
+    curCfg.amp   += (tgt.amp   - curCfg.amp)   * morphEase;
+    curCfg.speed += (tgt.speed - curCfg.speed) * morphEase;
+    curCfg.waves += (tgt.waves - curCfg.waves) * waveEase;
     const cfg = curCfg;
-    const reactGain = auraState==='speaking' ? 45
-                    : auraState==='listening' ? 40 : 14;
+    const reactGain = auraState==='speaking' ? 34
+                    : auraState==='listening' ? 38 : 12;
     const ampNow = cfg.amp + level * reactGain;
     const pts = ANG.map((a) => {
       // lobe SHAPE fixed by angle (a*waves) — peaks stay put, no rotation.
@@ -410,7 +412,7 @@
     const target = isReactive ? Math.min(1, rms() * 6) : 0;
     
     // synth-wave envelope: snap up on signal, decay slow on release
-    const k = target > smoothLevel ? 0.6 : 0.12;
+    const k = target > smoothLevel ? 0.35 : 0.08;
     smoothLevel += (target - smoothLevel) * k;
     if (window.DEBUG_LEVEL) subEl.textContent = 'lvl ' + smoothLevel.toFixed(2);
     const t = performance.now() / 1000;
@@ -595,8 +597,10 @@
       // Barge-in: while the assistant is processing/speaking, watch mic
       // RMS. If voice activity persists past _BARGE_VOICE_MS, send one
       // barge_in to the server (cooldown until next state change).
+      // Threshold sized to ignore short backchannels ("ok", "hm", "yeah")
+      // — those run ~300–500ms. Real interruptions are usually 800ms+.
       const _BARGE_RMS = 0.05;          // input level threshold
-      const _BARGE_VOICE_MS = 250;      // sustained voice to trigger
+      const _BARGE_VOICE_MS = 900;      // sustained voice to trigger
       let _bargeVoiceMs = 0;
       let _bargeCooldown = false;
       processor.onaudioprocess=(e)=>{

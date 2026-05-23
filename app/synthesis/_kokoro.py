@@ -47,6 +47,9 @@ class KokoroTTS(TTSProvider):
             print(f"Kokoro init failed: {e}. TTS disabled.")
             self._kokoro = None
 
+    def is_ready(self) -> bool:
+        return self._kokoro is not None
+
     def warmup(self) -> None:
         """Run a tiny synth so ONNX graphs / kernels are warm before
         the first user-visible call. Idempotent."""
@@ -87,10 +90,10 @@ class KokoroTTS(TTSProvider):
         return wav
 
     async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
-        """Yield WAV chunks as Kokoro produces them. First chunk lands
-        before the full sentence is rendered, so playback can start
-        earlier. Each chunk is a self-contained WAV the client decodes
-        independently."""
+        """Yield WAV chunks as Kokoro produces them. For short replies
+        Kokoro emits one chunk = full audio (single phoneme batch). The
+        async-generator shape is kept so the caller can stream chunks
+        once we move to a model that supports finer chunking."""
         if not self._kokoro or not text:
             return
         t0 = time.perf_counter()

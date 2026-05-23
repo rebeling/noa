@@ -40,6 +40,10 @@ _MIN_PARTIAL_BYTES = 8000
 # Whisper decode time grows with audio length; bounding it keeps partials
 # tractable on long turns. Final pass still sees the full buffer.
 _PARTIAL_WINDOW_BYTES = 192000
+# When the live (uncommitted) audio grows past window + slide_step, we
+# transcribe the oldest slide_step bytes once, append to committed, and
+# advance the commit offset. Non-overlapping → no duplicate words.
+_PARTIAL_SLIDE_STEP_BYTES = 96000  # ~3s
 # If a fresh partial landed within this window before vad_end, reuse it
 # as final instead of re-transcribing the whole turn audio.
 _FINAL_REUSE_PARTIAL_SECS = 0.8
@@ -54,48 +58,18 @@ _FAKE_SPEAKING_SECS = 3.0
 # Echo-LLM delay range: simulates LLM latency without an API call.
 _ECHO_LLM_MIN_SECS = 1.0
 _ECHO_LLM_MAX_SECS = 2.5
-# Split reply text into fragments before TTS so the first audio lands
-# fast. Fragments shorter than _TTS_FRAGMENT_MIN_CHARS get merged with
-# the next one to avoid sub-word chunks that sound choppy.
-_TTS_FRAGMENT_MIN_CHARS = 12
-_TTS_SENTENCE_PUNCT = ".!?,;:"
-# Pronunciation overrides for the TTS path only. UI keeps original
-# spelling; only the audio sees the phonetic form. Word-boundary
-# matched so "Noah" / "Noach" / etc. won't be touched.
-_TTS_PRONUNCIATION = {
-    "Noa": "Noah",
-    "noa": "Noah",
-}
+# Pronunciation overrides for the TTS path. Empty by default — add
+# entries here only if Kokoro mispronounces a specific name/term.
+_TTS_PRONUNCIATION: dict[str, str] = {}
 
 
 def _apply_tts_pronunciation(text: str) -> str:
+    if not _TTS_PRONUNCIATION:
+        return text
     import re
     for src, dst in _TTS_PRONUNCIATION.items():
         text = re.sub(rf"\b{re.escape(src)}\b", dst, text)
     return text
-
-
-def _split_for_tts(text: str) -> list[str]:
-    """Break `text` at sentence/clause punctuation. First fragment is
-    deliberately the head of the reply so Kokoro starts on a short
-    string and first audio chunk lands sooner. Merges runts < min chars
-    into the following fragment so the synth never sees a stub."""
-    if not text:
-        return []
-    fragments: list[str] = []
-    buf = ""
-    for ch in text:
-        buf += ch
-        if ch in _TTS_SENTENCE_PUNCT and len(buf.strip()) >= _TTS_FRAGMENT_MIN_CHARS:
-            fragments.append(buf.strip())
-            buf = ""
-    tail = buf.strip()
-    if tail:
-        if fragments and len(tail) < _TTS_FRAGMENT_MIN_CHARS:
-            fragments[-1] = fragments[-1] + " " + tail
-        else:
-            fragments.append(tail)
-    return fragments
 # Reply mode:
 #   'fake' — timed stub, no LLM, no TTS (offline plumbing test)
 #   'echo' — mock LLM (1.0–2.5s delay, echoes input), real TTS
@@ -227,29 +201,26 @@ class DialogueOrchestrator:
             reply = await llm_call(text)
             print(f"[llm ] total {(time.perf_counter()-t_llm)*1000:.0f}ms "
                   f"reply_chars={len(reply)}")
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "response", "text": reply}))
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Speaking..."}))
+            # Hold Speaking status + response text until the first audio
+            # chunk is ready. Otherwise UI flips to 'speaking' while TTS
+            # still synthesizes silently for 2-5s. All three land
+            # together: status, text, first audio.
             t_tts = time.perf_counter()
             chunks = 0
             total_bytes = 0
-            fragments = _split_for_tts(_apply_tts_pronunciation(reply))
-            print(f"[tts ] fragments={len(fragments)} "
-                  f"first_chars={len(fragments[0]) if fragments else 0}")
-            for f_idx, fragment in enumerate(fragments):
-                t_frag = time.perf_counter()
-                async for chunk in synthesis.synthesize_stream(fragment):
-                    if chunks == 0:
-                        print(f"[tts ] first_chunk_to_client "
-                              f"{(time.perf_counter()-t_tts)*1000:.0f}ms "
-                              f"bytes={len(chunk)}")
-                    chunks += 1
-                    total_bytes += len(chunk)
-                    await _safe_send_bytes(websocket, chunk)
-                print(f"[tts ] fragment={f_idx} done "
-                      f"{(time.perf_counter()-t_frag)*1000:.0f}ms "
-                      f"chars={len(fragment)}")
+            tts_text = _apply_tts_pronunciation(reply)
+            async for chunk in synthesis.synthesize_stream(tts_text):
+                if chunks == 0:
+                    print(f"[tts ] first_chunk_to_client "
+                          f"{(time.perf_counter()-t_tts)*1000:.0f}ms "
+                          f"bytes={len(chunk)}")
+                    await _safe_send_text(websocket, json.dumps(
+                        {"type": "status", "text": "Speaking..."}))
+                    await _safe_send_text(websocket, json.dumps(
+                        {"type": "response", "text": reply}))
+                chunks += 1
+                total_bytes += len(chunk)
+                await _safe_send_bytes(websocket, chunk)
             print(f"[tts ] stream_done {(time.perf_counter()-t_tts)*1000:.0f}ms "
                   f"chunks={chunks} bytes={total_bytes}")
             await _safe_send_text(websocket, json.dumps(
@@ -290,12 +261,14 @@ class DialogueOrchestrator:
         last_partial = ""
         last_partial_at: float = 0.0
         last_partial_buflen: int = 0
-        # Frozen text from windows that have scrolled off the partial
-        # window. Each time buflen crosses a new window boundary we
-        # promote the prior partial to committed so the client keeps
-        # showing the full turn instead of only the last 6s.
+        # Frozen text from audio that has scrolled off the live window.
+        # commit_offset is the byte index in audio_buffer where the live
+        # window starts; committed_text is the transcription of
+        # audio_buffer[:commit_offset]. Each live partial transcribes
+        # audio_buffer[commit_offset:] only, so committed + tail never
+        # share audio — no duplicate words.
         committed_text = ""
-        committed_buflen = 0
+        commit_offset = 0
         partial_task: asyncio.Task | None = None
         pending_reply: asyncio.Task | None = None
         turn_start_t0: float | None = None
@@ -308,7 +281,7 @@ class DialogueOrchestrator:
             with turn length; vad_filter=True inside ASR strips internal
             silence to keep it tractable for typical short turns."""
             nonlocal last_partial, last_partial_at, last_partial_buflen
-            nonlocal committed_text, committed_buflen
+            nonlocal committed_text, commit_offset
             try:
                 while True:
                     await asyncio.sleep(_PARTIAL_POLL_SECS)
@@ -318,25 +291,32 @@ class DialogueOrchestrator:
                     if buflen == last_partial_buflen:
                         # No new audio since last partial — skip decode.
                         continue
-                    # If the buffer has grown past the window, the prior
-                    # partial saw audio that the next snapshot won't.
-                    # Promote it to committed before we slide the window.
-                    if (
-                        buflen > _PARTIAL_WINDOW_BYTES
-                        and last_partial
-                        and last_partial_buflen > committed_buflen
-                    ):
-                        committed_text = (
-                            (committed_text + " " + last_partial).strip()
-                            if committed_text
-                            else last_partial
-                        )
-                        committed_buflen = last_partial_buflen
-                        print(f"[part ] committed grew chars={len(committed_text)} "
-                              f"committed_buflen={committed_buflen}")
-                    # Cap snapshot to last _PARTIAL_WINDOW_BYTES so decode
-                    # cost stays bounded as the turn grows.
-                    snapshot = bytes(audio_buffer[-_PARTIAL_WINDOW_BYTES:])
+                    # Slide check: if live segment is longer than window +
+                    # slide_step, freeze the oldest slide_step bytes as a
+                    # committed transcript and advance commit_offset.
+                    live_len = buflen - commit_offset
+                    if live_len > _PARTIAL_WINDOW_BYTES + _PARTIAL_SLIDE_STEP_BYTES:
+                        freeze_end = commit_offset + _PARTIAL_SLIDE_STEP_BYTES
+                        freeze_audio = bytes(audio_buffer[commit_offset:freeze_end])
+                        t_f = time.perf_counter()
+                        frozen_txt = (await asyncio.to_thread(
+                            speech.transcribe, freeze_audio, True)).strip()
+                        dt_f = (time.perf_counter() - t_f) * 1000
+                        if frozen_txt:
+                            committed_text = (
+                                (committed_text + " " + frozen_txt).strip()
+                                if committed_text
+                                else frozen_txt
+                            )
+                        commit_offset = freeze_end
+                        print(f"[part ] freeze {dt_f:5.0f}ms "
+                              f"frozen_chars={len(frozen_txt)} "
+                              f"committed_chars={len(committed_text)} "
+                              f"commit_offset={commit_offset}")
+                    # Live snapshot: only the uncommitted segment, capped
+                    # at window so decode time stays bounded.
+                    live_start = max(commit_offset, buflen - _PARTIAL_WINDOW_BYTES)
+                    snapshot = bytes(audio_buffer[live_start:])
                     t_p = time.perf_counter()
                     txt = (await asyncio.to_thread(
                         speech.transcribe, snapshot, True)).strip()
@@ -344,7 +324,8 @@ class DialogueOrchestrator:
                     audio_ms = len(snapshot) / 32  # int16@16kHz -> ms
                     changed = bool(txt) and txt != last_partial
                     print(f"[part ] {dt_p:5.0f}ms audio={audio_ms:.0f}ms "
-                          f"changed={changed} chars={len(txt)}")
+                          f"changed={changed} chars={len(txt)} "
+                          f"committed_chars={len(committed_text)}")
                     last_partial_buflen = buflen
                     if changed:
                         last_partial = txt
@@ -441,7 +422,7 @@ class DialogueOrchestrator:
                 if transition == "start":
                     last_partial = ""
                     committed_text = ""
-                    committed_buflen = 0
+                    commit_offset = 0
                     turn_start_t0 = time.perf_counter()
                     turn_end_t0 = None
                     partial_task = asyncio.create_task(partial_loop())
@@ -459,13 +440,23 @@ class DialogueOrchestrator:
                     # Show last partial to user immediately — UI feels
                     # instant even when final decode takes ~1s. Reply
                     # still triggers from the (more accurate) final.
-                    if last_partial:
+                    # Combine committed prefix + live tail so the
+                    # provisional render matches the growing partial
+                    # bubble (not just the last window).
+                    provisional_text = (
+                        (committed_text + " " + last_partial).strip()
+                        if committed_text
+                        else last_partial
+                    )
+                    if provisional_text:
                         await _safe_send_text(websocket, json.dumps(
-                            {"type": "transcript", "text": last_partial,
+                            {"type": "transcript", "text": provisional_text,
                              "provisional": True}))
                         print(f"[turn ] vad_end -> partial_shown: "
                               f"{(time.perf_counter()-turn_end_t0)*1000:.0f}ms "
-                              f"chars={len(last_partial)}")
+                              f"chars={len(provisional_text)} "
+                              f"(committed={len(committed_text)} "
+                              f"tail={len(last_partial)})")
                     final_audio = bytes(audio_buffer)
                     # Reuse last partial as final if:
                     #   - turn audio fits inside the partial sliding window
@@ -475,11 +466,16 @@ class DialogueOrchestrator:
                     age = time.perf_counter() - last_partial_at
                     covered = last_partial_buflen >= len(final_audio) - 8000
                     fits_window = len(final_audio) <= _PARTIAL_WINDOW_BYTES
+                    # Reuse only on short turns where partial saw the
+                    # whole audio. Once we've committed an offset the
+                    # last_partial only covers the live segment, so
+                    # reusing it would drop committed_text.
                     reuse = (
                         bool(last_partial)
                         and age < _FINAL_REUSE_PARTIAL_SECS
                         and covered
                         and fits_window
+                        and commit_offset == 0
                     )
                     if reuse:
                         text = last_partial
@@ -501,7 +497,7 @@ class DialogueOrchestrator:
                     last_partial_buflen = 0
                     last_partial_at = 0.0
                     committed_text = ""
-                    committed_buflen = 0
+                    commit_offset = 0
                     turn_start_t0 = None
 
                 if not speech.is_speaking and len(audio_buffer) > _IDLE_BUFFER_MAX:

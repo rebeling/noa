@@ -15,10 +15,8 @@ from app.synthesis import SynthesisService
 shared_tts = SynthesisService()
 
 
-GREETING_TEXT = "Hi! I'm Noa. How can I help?"
-# Kokoro G2P mispronounces "Noa" (reads as "No-ahs"). Render TTS with
-# the phonetic spelling while the UI still shows the brand name.
-GREETING_TTS_TEXT = "Hi! I'm Noah. How can I help?"
+GREETING_TEXT = "Welcome! How can I help?"
+GREETING_TTS_TEXT = GREETING_TEXT
 
 
 @asynccontextmanager

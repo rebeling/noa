@@ -1,16 +1,19 @@
-.PHONY: start start-echo start-real start-http dev-cert install clean help download-models
+.PHONY: start start-echo start-echo-piper start-echo-styletts2 start-real start-http dev-cert install clean help download-models
 
 help:
 	@echo "Available commands:"
-	@echo "  make start      - Start over HTTPS in fake-reply (debug) mode"
-	@echo "  make start-echo - Start over HTTPS, mock LLM (1-2.5s echo) + real TTS"
-	@echo "  make start-real - Start over HTTPS calling the real LLM + TTS"
-	@echo "  make start-http - Start over plain HTTP (fake-reply, localhost only)"
-	@echo "  make dev-cert   - Generate a self-signed dev certificate"
-	@echo "  make install    - Install dependencies using uv"
-	@echo "  make clean      - Remove temporary files and caches"
+	@echo "  make start                - Start over HTTPS in fake-reply (debug) mode"
+	@echo "  make start-echo           - echo mode + Kokoro TTS (default)"
+	@echo "  make start-echo-piper     - echo mode + Piper TTS"
+	@echo "  make start-echo-styletts2 - echo mode + StyleTTS2"
+	@echo "  make start-real           - real LLM + Kokoro TTS"
+	@echo "  make start-http           - plain HTTP, fake reply (localhost only)"
+	@echo "  make dev-cert             - Generate a self-signed dev certificate"
+	@echo "  make install              - Install dependencies using uv"
+	@echo "  make clean                - Remove temporary files and caches"
 	@echo ""
-	@echo "Reply mode is set by NOA_REPLY_MODE=fake|echo|real (default fake)."
+	@echo "Reply mode: NOA_REPLY_MODE=fake|echo|real      (default fake)"
+	@echo "TTS prov:   NOA_TTS_PROVIDER=kokoro|piper|styletts2  (default kokoro)"
 
 start: dev-cert
 	@echo "Open: https://localhost:8000  (reply_mode=fake)"
@@ -18,8 +21,18 @@ start: dev-cert
 		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
 
 start-echo: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=echo, real TTS)"
-	NOA_REPLY_MODE=echo uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=kokoro)"
+	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=kokoro uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
+
+start-echo-piper: dev-cert
+	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=piper voice=$${NOA_PIPER_VOICE:-jenny})"
+	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=piper uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
+
+start-echo-styletts2: dev-cert
+	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=styletts2)"
+	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=styletts2 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
 		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
 
 start-real: dev-cert
