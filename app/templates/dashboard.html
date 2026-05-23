@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <!-- Knowledge Ingestion -->
+    <div class="bg-white shadow rounded-lg p-4 sm:p-6 xl:p-8">
+        <h3 class="text-xl leading-none font-bold text-gray-900 mb-6">Knowledge Ingestion</h3>
+        
+        <form hx-post="/api/v1/ingestion/upload" hx-encoding="multipart/form-data" hx-target="#upload-result">
+            <div class="flex items-center justify-center w-full">
+                <label for="dropzone-file" class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100">
+                    <div class="flex flex-col items-center justify-center pt-5 pb-6">
+                        <p class="mb-2 text-sm text-gray-500"><span class="font-semibold">Click to upload</span> or drag and drop</p>
+                        <p class="text-xs text-gray-500">Plain Text (TXT)</p>
+                    </div>
+                    <input id="dropzone-file" name="file" type="file" class="hidden" />
+                </label>
+            </div>
+            <button type="submit" class="mt-4 w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-150 ease-in-out">
+                Upload & Redact
+            </button>
+        </form>
+        
+        <div id="upload-result" class="mt-4"></div>
+    </div>
+
+    <!-- Voice Chat (The "Ears") -->
+    <div class="bg-white shadow rounded-lg p-4 sm:p-6 xl:p-8">
+        <h3 class="text-xl leading-none font-bold text-gray-900 mb-6">Voice Dialogue</h3>
+        
+        <div class="flex flex-col items-center space-y-4">
+            <div id="status-indicator" class="w-4 h-4 rounded-full bg-gray-400"></div>
+            <p id="chat-status" class="text-gray-600">Disconnected</p>
+            
+            <div class="flex space-x-4">
+                <button id="start-btn" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-full transition duration-150 ease-in-out">
+                    Start Conversation
+                </button>
+                <button id="stop-btn" class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-6 rounded-full hidden transition duration-150 ease-in-out">
+                    Stop
+                </button>
+            </div>
+
+            <div id="transcript" class="w-full h-48 overflow-y-auto p-4 bg-gray-50 rounded border border-gray-200 text-sm">
+                <p class="text-gray-400 italic">Transcription will appear here...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let socket = null;
+    let audioContext = null;
+    let processor = null;
+    let stream = null;
+
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const statusInd = document.getElementById('status-indicator');
+    const statusText = document.getElementById('chat-status');
+    const transcript = document.getElementById('transcript');
+
+    function appendMessage(label, text, toneClass) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'mb-3';
+
+        const caption = document.createElement('div');
+        caption.className = `mb-0.5 text-[11px] font-medium uppercase tracking-wide ${toneClass}`;
+        caption.textContent = label;
+
+        const body = document.createElement('p');
+        body.className = 'text-sm leading-relaxed text-gray-800';
+        body.textContent = text;
+
+        wrapper.appendChild(caption);
+        wrapper.appendChild(body);
+        transcript.appendChild(wrapper);
+        transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    async function startVoice() {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            const source = audioContext.createMediaStreamSource(stream);
+            
+            // ScriptProcessor for simplicity in MVP, upgrade to AudioWorklet later
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+            
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/voice/ws`);
+            socket.binaryType = 'arraybuffer';
+
+            socket.onopen = () => {
+                statusInd.className = 'w-4 h-4 rounded-full bg-green-500 animate-pulse';
+                statusText.innerText = 'Listening...';
+                startBtn.classList.add('hidden');
+                stopBtn.classList.remove('hidden');
+            };
+
+            socket.onmessage = async (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    // Play received audio chunk
+                    const blob = new Blob([event.data], { type: 'audio/wav' });
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    audio.play();
+                } else {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'transcript') {
+                        appendMessage('You', data.text, 'text-blue-500');
+                    } else if (data.type === 'response') {
+                        appendMessage('Assistant', data.text, 'text-emerald-600');
+                    } else if (data.type === 'stop_audio') {
+                        // In a real implementation, we'd stop all current audio elements
+                        console.log("Stopping audio playback due to interruption");
+                    }
+                }
+            };
+
+            processor.onaudioprocess = (e) => {
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    // Convert float32 to int16
+                    const pcmData = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                    }
+                    socket.send(pcmData.buffer);
+                }
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+
+        } catch (err) {
+            console.error('Error accessing microphone:', err);
+            alert('Microphone access denied or error.');
+        }
+    }
+
+    function stopVoice() {
+        if (socket) socket.close();
+        if (processor) processor.disconnect();
+        if (audioContext) audioContext.close();
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        
+        statusInd.className = 'w-4 h-4 rounded-full bg-gray-400';
+        statusText.innerText = 'Disconnected';
+        startBtn.classList.remove('hidden');
+        stopBtn.classList.add('hidden');
+    }
+
+    startBtn.onclick = startVoice;
+    stopBtn.onclick = stopVoice;
+</script>
+{% endblock %}

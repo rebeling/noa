@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} · Noa</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* ---- global dark theme ------------------------------------------
+         Remaps the light Tailwind utilities used across templates to dark
+         equivalents, so individual pages need no class changes. */
+      :root { color-scheme: dark; }
+      body { background: #0a0f1c; color: #cdd9e4; }
+
+      /* surfaces */
+      .bg-white    { background-color: #121826 !important; }
+      .bg-gray-50  { background-color: #0d1320 !important; }
+      .bg-gray-100 { background-color: #0a0f1c !important; }
+
+      /* borders */
+      .border-gray-200 { border-color: rgba(160,200,220,.12) !important; }
+      .border-gray-300 { border-color: rgba(160,200,220,.18) !important; }
+
+      /* text */
+      .text-gray-900 { color: #e8eef5 !important; }
+      .text-gray-800 { color: #cdd9e4 !important; }
+      .text-gray-600 { color: #9fb0c2 !important; }
+      .text-gray-500 { color: #7d8da3 !important; }
+      .text-gray-400 { color: #6b7a8f !important; }
+      .text-blue-600 { color: #6db4ff !important; }
+
+      /* shadows read as soft depth on dark */
+      .shadow, .shadow-inner { box-shadow: 0 8px 30px rgba(0,0,0,.45) !important; }
+
+      /* hover states */
+      .hover\:bg-gray-100:hover { background-color: #1a2233 !important; }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans leading-normal tracking-normal">
+    <nav class="border-b fixed z-30 w-full" style="background:#0d1320;border-color:rgba(160,200,220,.12);">
+        <div class="px-3 py-3 lg:px-5 lg:pl-3">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center justify-start">
+                    <a href="/api/v1/voice" class="text-xl font-bold flex items-center lg:ml-2.5">
+                        <span class="self-center whitespace-nowrap" style="color:#7fe6d4;">Noa</span>
+                    </a>
+                    <!-- Top Level Menu -->
+                    <div class="flex items-center ml-10 space-x-6">
+                        <a href="/api/v1/ingestion" class="flex items-center {% if page == 'ingestion' %}text-blue-600 font-bold{% else %}text-gray-600{% endif %} hover:text-blue-600 font-medium transition duration-150 ease-in-out">
+                            Ingestion
+                        </a>
+                    </div>
+                </div>
+                <!-- Language toggle. Persists to localStorage.noaLang.
+                     Read by voice.html when opening the WebSocket. -->
+                <button
+                    id="lang-toggle"
+                    type="button"
+                    class="px-3 py-1 text-xs font-semibold rounded-full border transition duration-150 ease-in-out"
+                    style="color:#cdd9e4;border-color:rgba(160,200,220,.28);background:rgba(255,255,255,.04);"
+                    aria-label="Toggle language"
+                >EN</button>
+            </div>
+            <script>
+              (function(){
+                var saved = (localStorage.getItem('noaLang') || 'en').toLowerCase();
+                if (saved !== 'de' && saved !== 'en') saved = 'en';
+                var button = document.getElementById('lang-toggle');
+
+                function render(lang) {
+                  button.textContent = lang.toUpperCase();
+                  button.setAttribute('aria-pressed', lang === 'de' ? 'true' : 'false');
+                }
+
+                render(saved);
+
+                button.addEventListener('click', function(){
+                  var next = (localStorage.getItem('noaLang') || saved).toLowerCase() === 'en' ? 'de' : 'en';
+                  localStorage.setItem('noaLang', next);
+                  saved = next;
+                  render(next);
+                  // Notify open WS sessions (voice page) so ASR switches
+                  // without a reload. voice.html attaches the listener.
+                  window.dispatchEvent(new CustomEvent('noa-lang-change', {detail: next}));
+                });
+              })();
+            </script>
+        </div>
+    </nav>
+    <div class="overflow-hidden bg-gray-50 pt-10">
+        <div id="main-content" class="h-full w-full bg-gray-50 relative overflow-y-auto">
+            <main>
+                <div class="pt-6 px-4">
+                    {% block content %}{% endblock %}
+                </div>
+            </main>
+        </div>
+    </div>
+</body>
+</html>

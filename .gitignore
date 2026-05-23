@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache
+
+# Virtual environments
+.venv
+voices-v1.0.bin
+kokoro-v1.0.onnx
+*.onnx
+.env
+
+# Local development TLS certificate — never commit
+certs/
+.claude
+CLAUDE.md
+AGENTS.md
+GEMINI.md
