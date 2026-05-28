@@ -11,7 +11,9 @@
   .noa-stage {
     position: relative;
     margin: -1.5rem -1rem 0;
-    min-height: calc(100vh - 2.5rem);
+    min-height: auto;
+    height: calc(100vh - 2rem);
+/*    max-height: calc(100vh - 8rem); */
     background: linear-gradient(to bottom, #14233a 0%, #0a0f1c 60%, #05070d 100%);
     overflow: hidden;
     display: flex;
@@ -126,7 +128,7 @@
     display: flex;
     gap: 1rem;
     margin-top: auto;
-    margin-bottom: clamp(4.5rem, 11vh, 7rem);
+    margin-bottom: 2rem;
     z-index: 4;
   }
   .noa-btn {
@@ -239,6 +241,20 @@
       <button class="debug-btn" onclick="mockMsg('user')">Mock User</button>
       <button class="debug-btn" onclick="mockMsg('assistant')">Mock Asst</button>
     </div>
+    <div class="debug-group">
+      <div class="debug-label">User: <b>{{ current_user }}</b> &middot; role: <b>{{ current_role }}</b></div>
+      <input id="user-input" type="text" value="{{ current_user }}"
+             placeholder="user id"
+             style="background:rgba(255,255,255,0.06);border:1px solid rgba(160,180,200,0.3);
+                    color:#e6eef5;border-radius:4px;padding:3px 6px;width:120px;font-size:12px;">
+      <select id="role-input"
+              style="background:rgba(255,255,255,0.06);border:1px solid rgba(160,180,200,0.3);
+                     color:#e6eef5;border-radius:4px;padding:3px 6px;font-size:12px;">
+        <option value="admin" {% if current_role == 'admin' %}selected{% endif %}>admin (ingest)</option>
+        <option value="customer" {% if current_role == 'customer' %}selected{% endif %}>customer (query only)</option>
+      </select>
+      <button class="debug-btn" onclick="switchUser()">Switch</button>
+    </div>
   </div>
 
   <div class="noa-wrap" id="isi" data-state="idle">
@@ -293,6 +309,16 @@
   const transcript= document.getElementById('transcript');
   let livePartialBubble = null;
   let followTranscript = true;
+
+  // Reload the page as a different user. The server mints a JWT for this
+  // subject, which becomes the cognee tenant — so the voice session then
+  // queries that user's knowledge graph.
+  function switchUser(){
+    const v = (document.getElementById('user-input').value || '').trim();
+    if(!v) return;
+    const r = (document.getElementById('role-input').value || 'admin');
+    location.search = '?user=' + encodeURIComponent(v) + '&role=' + encodeURIComponent(r);
+  }
 
   transcript.addEventListener('scroll', () => {
     const bottomGap = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
@@ -410,7 +436,7 @@
     // enable reactivity for both listening (user) and speaking (assistant)
     const isReactive = auraState === 'listening' || auraState === 'speaking';
     const target = isReactive ? Math.min(1, rms() * 6) : 0;
-    
+
     // synth-wave envelope: snap up on signal, decay slow on release
     const k = target > smoothLevel ? 0.35 : 0.08;
     smoothLevel += (target - smoothLevel) * k;

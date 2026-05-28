@@ -29,6 +29,7 @@ from app.contracts import (
 )
 from app.bus import EventBus
 from app.dialogue import DialogueService
+from app.ingestion import IngestionService
 from app.speech_input import SpeechInputService
 from app.synthesis import SynthesisService
 
@@ -76,6 +77,85 @@ def _apply_tts_pronunciation(text: str) -> str:
 #   'real' — real LLM + real TTS
 _REPLY_MODE = os.environ.get("NOA_REPLY_MODE", "fake").lower()
 
+# First tokens that mark an utterance as a question worth a knowledge-graph
+# lookup. Crude on purpose — swap this whole function for a classifier model
+# if precision matters.
+_QUESTION_WORDS = frozenset(
+    "who what when where why how which whose whom "
+    "is are am was were can could would should "
+    "do does did will may might shall".split()
+)
+
+
+# Greeting pool per language — one picked at random per session so the
+# assistant doesn't open with the same line every time.
+_GREETINGS = {
+    "en": [
+        "Hi, how can I help?",
+        "Hey there — what's up?",
+        "Hello! What can I do for you?",
+        "Hi! What's on your mind?",
+        "Hey! Ready when you are.",
+        "Good to see you — how can I help?",
+    ],
+    "de": [
+        "Hi, wie kann ich helfen?",
+        "Hallo! Was gibt's?",
+        "Hey, was kann ich für dich tun?",
+        "Hallo! Was beschäftigt dich?",
+        "Hi! Ich bin bereit, wenn du es bist.",
+        "Schön, dass du da bist — wie kann ich helfen?",
+    ],
+}
+
+
+def _looks_like_question(text: str) -> bool:
+    """Heuristic question detector. True if the utterance ends with '?'
+    or opens with a question word. No model, no API call — the cheap
+    routing gate that decides whether to hit Cognee."""
+    t = text.strip().lower()
+    if not t:
+        return False
+    if t.endswith("?"):
+        return True
+    first = t.split(None, 1)[0].strip(".,!?;:")
+    return first in _QUESTION_WORDS
+
+
+# Wake phrases that mark a spoken turn as "store this as a fact". Everything
+# after the phrase is ingested. Lowercased, matched at the start of the turn.
+_FACT_PREFIXES = (
+    "remember that ",
+    "remember ",
+    "note that ",
+    "merk dir dass ",
+    "merk dir, dass ",
+    "merk dir ",
+    "merke dir ",
+)
+# Spoken confirmation after a successful fact ingest, per language.
+_FACT_CONFIRM = {
+    "en": "Got it. I'll remember that.",
+    "de": "Verstanden. Ich merke es mir.",
+}
+# Spoken refusal when a non-admin tries to add a fact.
+_FACT_DENIED = {
+    "en": "Sorry, only an admin can add facts. I can answer questions, though.",
+    "de": "Nur ein Administrator kann Fakten hinzufügen. Fragen beantworte ich aber gern.",
+}
+
+
+def _extract_fact(text: str) -> str | None:
+    """If `text` opens with a fact wake-phrase, return the fact body
+    (everything after the phrase). Otherwise None. Crude/swappable."""
+    t = text.strip()
+    low = t.lower()
+    for prefix in _FACT_PREFIXES:
+        if low.startswith(prefix):
+            body = t[len(prefix):].strip()
+            return body or None
+    return None
+
 
 def _is_open(ws) -> bool:
     return ws.client_state == WebSocketState.CONNECTED
@@ -104,23 +184,37 @@ class DialogueOrchestrator:
     SynthesisService so each new session skips Kokoro cold-load. Falls
     back to a fresh per-session instance if none is provided."""
 
-    def __init__(
-        self,
-        shared_tts: SynthesisService | None = None,
-        greeting_text: str | None = None,
-        greeting_wav: bytes | None = None,
-    ) -> None:
+    def __init__(self, shared_tts: SynthesisService | None = None) -> None:
         self._shared_tts = shared_tts
-        self._greeting_text = greeting_text
-        self._greeting_wav = greeting_wav
 
-    async def run_session(self, websocket, language: str = "en") -> None:
+    async def run_session(
+        self,
+        websocket,
+        language: str = "en",
+        user_id: str = "anonymous",
+        dataset_name: str = "default",
+        role: str = "customer",
+    ) -> None:
         bus = EventBus()
         speech = SpeechInputService(language=language)
-        dialogue = DialogueService()
-        synthesis = self._shared_tts or SynthesisService()
+        dialogue = DialogueService(language=language)
+        ingestion = IngestionService()  # cognee loads lazily on first query
+        # The shared, pre-warmed TTS is English-only. Reuse it for English
+        # sessions (warm start); build a fresh per-session instance for
+        # other languages so we never mutate the shared instance's
+        # language out from under a concurrent English session.
+        if self._shared_tts is not None and language == "en":
+            synthesis = self._shared_tts
+            using_shared = True
+        else:
+            synthesis = SynthesisService(language=language)
+            using_shared = False
         print(f"session: reply_mode={_REPLY_MODE} language={language} "
-              f"shared_tts={self._shared_tts is not None}")
+              f"user_id={user_id} role={role} dataset={dataset_name} "
+              f"shared_tts={using_shared}")
+        # session language is mutable via set_language; capture in a holder
+        # the closures read so a mid-session switch reaches fact confirm/deny.
+        session_lang = language
 
         # --- event handlers: parts never call each other directly ---
         async def on_partial(event: PartialTranscript) -> None:
@@ -176,8 +270,9 @@ class DialogueOrchestrator:
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
-        async def _echo_llm(text: str) -> str:
-            """Mock LLM: wait 1.0–2.5s, return input verbatim.
+        async def _echo_llm(text: str, context: str | None = None) -> str:
+            """Mock LLM: wait 1.0–2.5s, return input verbatim. Ignores
+            context (no retrieval in echo mode).
             Lets us exercise the full Processing/Speaking + TTS path
             without an OpenAI call. Same await semantics as the real
             LLM, so barge-in cancels cleanly."""
@@ -189,16 +284,31 @@ class DialogueOrchestrator:
             return text
 
         async def _reply_with_tts(text: str, llm_call) -> None:
-            """Shared path: status=Processing → llm_call → status=Speaking
-            → streamed TTS chunks → status=Waiting. `llm_call` is an
-            async callable taking the user text and returning the reply
-            text, so 'real' and 'echo' modes share this body.
+            """Shared path: status=Processing → [retrieve] → llm_call →
+            status=Speaking → streamed TTS chunks → status=Waiting.
+            `llm_call` is an async callable (user_text, context) → reply,
+            so 'real' and 'echo' modes share this body.
+            Routing gate: only questions trigger a Cognee lookup; chitchat
+            goes straight to the LLM with no context. A cognee miss or
+            error returns "" (see _cognee.search) and degrades to plain
+            chat — the turn never crashes on retrieval.
             TTS streams chunk-by-chunk so the client starts playback on
             the first chunk instead of waiting for the full sentence."""
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Processing..."}))
+            context: str | None = None
+            is_question = _looks_like_question(text)
+            if is_question:
+                t_q = time.perf_counter()
+                result = await ingestion.query(text, user_id, dataset_name)
+                context = result or None
+                print(f"[route] question=True "
+                      f"ctx_chars={len(context or '')} "
+                      f"{(time.perf_counter()-t_q)*1000:.0f}ms")
+            else:
+                print("[route] question=False ctx_chars=0")
             t_llm = time.perf_counter()
-            reply = await llm_call(text)
+            reply = await llm_call(text, context)
             print(f"[llm ] total {(time.perf_counter()-t_llm)*1000:.0f}ms "
                   f"reply_chars={len(reply)}")
             # Hold Speaking status + response text until the first audio
@@ -226,11 +336,55 @@ class DialogueOrchestrator:
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
+        async def _speak(message: str) -> None:
+            """Send a fixed assistant `message` as text + streamed TTS.
+            Used for fact confirm/deny — no LLM, just voice feedback.
+            In fake mode (no TTS) just sends the text + status."""
+            await _safe_send_text(websocket, json.dumps(
+                {"type": "response", "text": message}))
+            if _REPLY_MODE == "fake":
+                await _safe_send_text(websocket, json.dumps(
+                    {"type": "status", "text": "Waiting..."}))
+                return
+            await _safe_send_text(websocket, json.dumps(
+                {"type": "status", "text": "Speaking..."}))
+            tts_text = _apply_tts_pronunciation(message)
+            async for chunk in synthesis.synthesize_stream(tts_text):
+                await _safe_send_bytes(websocket, chunk)
+            await _safe_send_text(websocket, json.dumps(
+                {"type": "status", "text": "Waiting..."}))
+
+        async def _handle_fact(fact: str) -> None:
+            """Ingest a spoken fact into the user's cognee graph (admin
+            only). Redaction happens inside ingestion.ingest — no bypass.
+            Confirms or refuses by voice."""
+            if role != "admin":
+                print(f"[fact ] denied role={role}")
+                await _speak(_FACT_DENIED.get(session_lang, _FACT_DENIED["en"]))
+                return
+            await _safe_send_text(websocket, json.dumps(
+                {"type": "status", "text": "Processing..."}))
+            try:
+                t0 = time.perf_counter()
+                await ingestion.ingest(fact, user_id, dataset_name)
+                print(f"[fact ] ingested chars={len(fact)} "
+                      f"{(time.perf_counter()-t0)*1000:.0f}ms")
+                await _speak(_FACT_CONFIRM.get(session_lang, _FACT_CONFIRM["en"]))
+            except Exception as e:  # noqa: BLE001
+                print(f"[fact ] ingest failed: {e}")
+                await _speak(_FACT_CONFIRM.get(session_lang, _FACT_CONFIRM["en"]))
+
         async def _delayed_reply(text: str) -> None:
             """Mode-switching wrapper. NOA_REPLY_MODE picks fake/echo/real.
-            Cancellation is handled here so all modes share the same
-            barge-in cleanup (stop_audio + status=Listening)."""
+            A fact wake-phrase ('Remember that ...') routes to ingestion
+            instead of the LLM. Cancellation is handled here so all modes
+            share the same barge-in cleanup (stop_audio + status=Listening)."""
             try:
+                fact = _extract_fact(text)
+                if fact is not None:
+                    print(f"[route] fact=True role={role} chars={len(fact)}")
+                    await _handle_fact(fact)
+                    return
                 if _REPLY_MODE == "real":
                     await _reply_with_tts(text, dialogue.respond)
                 elif _REPLY_MODE == "echo":
@@ -341,9 +495,12 @@ class DialogueOrchestrator:
         # pipeline is hot. Uses the pre-rendered WAV from app boot
         # when available so the audio arrives instantly.
         async def _greet() -> None:
-            phrase = self._greeting_text or "Hi! I'm Noa. How can I help?"
-            cached_wav = self._greeting_wav
-            print(f"[greet] mode={_REPLY_MODE} cached={bool(cached_wav)}")
+            # Random greeting per session, in the session language —
+            # synthesized on demand (no fixed cached phrase).
+            pool = _GREETINGS.get(session_lang, _GREETINGS["en"])
+            phrase = random.choice(pool)
+            print(f"[greet] mode={_REPLY_MODE} lang={session_lang} "
+                  f"phrase={phrase!r}")
             if _REPLY_MODE == "fake":
                 await _safe_send_text(websocket, json.dumps(
                     {"type": "response", "text": phrase}))
@@ -355,19 +512,14 @@ class DialogueOrchestrator:
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Speaking..."}))
             t0 = time.perf_counter()
-            if cached_wav:
-                await _safe_send_bytes(websocket, cached_wav)
-                print(f"[greet] cached_sent {(time.perf_counter()-t0)*1000:.0f}ms "
-                      f"bytes={len(cached_wav)}")
-            else:
-                chunks = 0
-                async for chunk in synthesis.synthesize_stream(phrase):
-                    if chunks == 0:
-                        print(f"[greet] first_chunk {(time.perf_counter()-t0)*1000:.0f}ms")
-                    chunks += 1
-                    await _safe_send_bytes(websocket, chunk)
-                print(f"[greet] stream_done {(time.perf_counter()-t0)*1000:.0f}ms "
-                      f"chunks={chunks}")
+            chunks = 0
+            async for chunk in synthesis.synthesize_stream(phrase):
+                if chunks == 0:
+                    print(f"[greet] first_chunk {(time.perf_counter()-t0)*1000:.0f}ms")
+                chunks += 1
+                await _safe_send_bytes(websocket, chunk)
+            print(f"[greet] stream_done {(time.perf_counter()-t0)*1000:.0f}ms "
+                  f"chunks={chunks}")
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
@@ -395,7 +547,18 @@ class DialogueOrchestrator:
                         if ctype == "set_language":
                             lang = str(ctrl.get("language", "")).lower()
                             if lang:
+                                session_lang = lang
                                 speech.set_language(lang)
+                                dialogue.set_language(lang)
+                                # TTS: never mutate the shared (English)
+                                # instance. If this session is on the shared
+                                # one and switches away from English, swap to
+                                # a fresh per-session synthesizer.
+                                if using_shared and lang != "en":
+                                    synthesis = SynthesisService(language=lang)
+                                    using_shared = False
+                                else:
+                                    synthesis.set_language(lang)
                                 print(f"language switched to {lang}")
                         elif ctype == "barge_in":
                             # Cancel a pending fake-LLM reply so the user

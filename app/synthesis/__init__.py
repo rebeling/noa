@@ -1,9 +1,14 @@
 """Synthesis part — text-to-speech.
 
-Public surface: SynthesisService. Provider selected at runtime via
-`NOA_TTS_PROVIDER=kokoro|piper|styletts2` (default: kokoro). Each
-provider is in its own underscore-private module and shares the
-TTSProvider contract from app.contracts.
+Public surface: SynthesisService. The English provider is selected at
+runtime via `NOA_TTS_PROVIDER=kokoro|piper|styletts2` (default: kokoro).
+German always uses Piper (Kokoro v1.0 ships no German voice), via a
+German voice file configured by `NOA_PIPER_DE_VOICE`.
+
+Language-aware: the service keeps one provider per language and picks
+the active one from the session language (set at construction and
+switchable mid-session via set_language). Each provider is in its own
+underscore-private module and shares the TTSProvider contract.
 
 Lazy loading: heavy imports (kokoro_onnx, piper, styletts2) are
 deferred to the first synth/warmup call so `import app.synthesis`
@@ -17,27 +22,47 @@ __all__ = ["SynthesisService"]
 
 
 _PROVIDER = os.environ.get("NOA_TTS_PROVIDER", "kokoro").lower()
+# Kokoro v1.0 has no German voice, so German always goes through Piper.
+_DE_PIPER_VOICE = os.environ.get(
+    "NOA_PIPER_DE_VOICE", "voices/de_DE-thorsten-medium.onnx"
+)
 
 
 class SynthesisService:
-    """Owns the TTS provider for one session. Provider is picked once
-    at first use based on NOA_TTS_PROVIDER. Model load is deferred to
-    the same call so import-time stays fast."""
+    """Owns one TTS provider per language and renders with the active
+    one. The English provider follows NOA_TTS_PROVIDER; German uses
+    Piper. Providers load lazily on first use for their language, so a
+    session that never speaks German never loads the German model."""
 
-    def __init__(self) -> None:
-        self._tts = None  # built lazily — see _get_tts()
-        self._provider_name = _PROVIDER
+    def __init__(self, language: str = "en") -> None:
+        # provider instances keyed by language code, built lazily
+        self._providers: dict[str, object] = {}
+        self._language = language if language in ("en", "de") else "en"
 
-    def _get_tts(self):
-        """Load the configured TTS provider on first use. Each branch
-        does its own heavy import so unused providers stay out of
-        memory. If the configured provider fails to initialize (missing
-        package, missing model file, etc.), fall back to Kokoro so the
-        session still produces audio."""
-        if self._tts is not None:
-            return self._tts
-        name = self._provider_name
-        print(f"[tts] requested provider={name}")
+    def set_language(self, language: str) -> None:
+        """Switch the active synthesis language. The provider for the new
+        language is built on its next use, not here."""
+        if language in ("en", "de"):
+            self._language = language
+
+    def _build_provider(self, language: str):
+        """Construct the TTS provider for `language`. English honors
+        NOA_TTS_PROVIDER (default Kokoro); German uses Piper with a
+        German voice. Falls back to Kokoro if a provider can't init."""
+        if language == "de":
+            from app.synthesis._piper import PiperTTS
+
+            candidate = PiperTTS(_DE_PIPER_VOICE)
+            if candidate.is_ready():
+                print(f"[tts] de provider=piper voice={_DE_PIPER_VOICE}")
+                return candidate
+            print("[tts] de Piper not ready, falling back to kokoro (no German voice)")
+            from app.synthesis._kokoro import KokoroTTS
+
+            return KokoroTTS()
+        # English (or anything else): the configured provider.
+        name = _PROVIDER
+        print(f"[tts] en requested provider={name}")
         candidate = None
         if name == "piper":
             from app.synthesis._piper import PiperTTS
@@ -51,31 +76,37 @@ class SynthesisService:
         else:
             print(f"[tts] unknown provider '{name}', using kokoro")
         if candidate is not None and candidate.is_ready():
-            self._tts = candidate
-            print(f"[tts] using provider={name}")
-            return self._tts
+            print(f"[tts] en using provider={name}")
+            return candidate
         if name != "kokoro":
             print(f"[tts] provider={name} not ready, falling back to kokoro")
         from app.synthesis._kokoro import KokoroTTS
-        self._tts = KokoroTTS()
-        self._provider_name = "kokoro"
-        return self._tts
+        return KokoroTTS()
+
+    def _get_tts(self, language: str | None = None):
+        """Return the provider for `language` (defaults to the active
+        session language), building it on first use."""
+        lang = language or self._language
+        if lang not in ("en", "de"):
+            lang = "en"
+        if lang not in self._providers:
+            self._providers[lang] = self._build_provider(lang)
+        return self._providers[lang]
 
     def warmup(self) -> None:
-        """Force model load + a tiny dummy synth so the first real
-        synth call doesn't pay cold-start cost. Safe to call repeatedly."""
+        """Warm the active language's provider. Safe to call repeatedly."""
         self._get_tts().warmup()
 
     def precache(self, text: str) -> bytes:
-        """Synth `text` once, return WAV. Caller caches and replays."""
+        """Synth `text` once with the active provider, return WAV."""
         return self._get_tts().precache(text)
 
     def synthesize(self, text: str) -> bytes:
-        """Render `text` to one WAV blob. Returns empty bytes if TTS
-        failed to init."""
+        """Render `text` with the active language's provider. Returns
+        empty bytes if TTS failed to init."""
         return self._get_tts().synthesize(text)
 
     async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
-        """Stream WAV chunks. Yields nothing if TTS failed to init."""
+        """Stream WAV chunks from the active language's provider."""
         async for chunk in self._get_tts().synthesize_stream(text):
             yield chunk

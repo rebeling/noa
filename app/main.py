@@ -15,22 +15,17 @@ from app.synthesis import SynthesisService
 shared_tts = SynthesisService()
 
 
-GREETING_TEXT = "Welcome! How can I help?"
-GREETING_TTS_TEXT = GREETING_TEXT
-
-
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
     # Warm Kokoro in a thread so boot stays non-blocking. First user
     # session then hits a hot model. Exposed on app.state so the
     # voice endpoint can hand it to the orchestrator.
     await asyncio.to_thread(shared_tts.warmup)
-    # Pre-render the fixed greeting once. Sessions then send the
-    # cached WAV instantly instead of running TTS each connect.
-    greeting_wav = await asyncio.to_thread(shared_tts.precache, GREETING_TTS_TEXT)
+    # Run one synth to fully warm the model graph (result discarded).
+    # The session greeting is NOT fixed — the orchestrator picks a random
+    # greeting per session in the session language, so we don't cache one.
+    await asyncio.to_thread(shared_tts.precache, "Hi, how can I help?")
     app_.state.shared_tts = shared_tts
-    app_.state.greeting_text = GREETING_TEXT
-    app_.state.greeting_wav = greeting_wav
     yield
 
 

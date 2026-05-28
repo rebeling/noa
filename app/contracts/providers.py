@@ -33,9 +33,15 @@ class LLMProvider(ABC):
     """Response generation from a user utterance."""
 
     @abstractmethod
-    async def respond(self, user_text: str) -> str:
+    async def respond(self, user_text: str, context: str | None = None) -> str:
         """Produce a reply to `user_text`. Implementations own their own
-        conversation history."""
+        conversation history.
+
+        `context` is optional retrieved knowledge (e.g. a knowledge-graph
+        search result) the implementation may ground its answer on. It is
+        transient per-turn — implementations must not persist it into
+        conversation history.
+        """
         raise NotImplementedError
 
 
