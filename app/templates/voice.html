@@ -123,14 +123,12 @@
     transition: color .6s ease;
   }
 
-  /* controls */
-  .noa-controls {
-    display: flex;
-    gap: 1rem;
-    margin-top: auto;
-    margin-bottom: 2rem;
-    z-index: 4;
-  }
+  /* Orb is the toggle: tap to wake when asleep, tap to sleep when awake.
+     Always clickable, with a gentle hover lift. */
+  .noa-wrap { cursor: pointer; }
+  .noa-wrap:hover .core { transform: scale(1.04); transition: transform .3s ease; }
+  .noa-wrap:hover ~ .noa-caption .sub { color: rgba(180,210,225,.75); }
+
   .noa-btn {
     font-family: 'Space Mono', monospace;
     font-size: .72rem; letter-spacing: .18em;
@@ -279,15 +277,10 @@
   </div>
 
   <div class="noa-caption">
-    <div class="sub" id="noa-sub">asleep</div>
+    <div class="sub" id="noa-sub">tap to wake</div>
   </div>
 
   <div class="transcript-drawer" id="transcript"></div>
-
-  <div class="noa-controls">
-    <button id="start-btn" class="noa-btn">WAKE NOA</button>
-    <button id="stop-btn"  class="noa-btn stop hidden">rest</button>
-  </div>
 </div>
 
 <script>
@@ -304,8 +297,6 @@
   const core      = document.getElementById('noa-core');
   const blob      = document.getElementById('blob');
   const subEl     = document.getElementById('noa-sub');
-  const startBtn  = document.getElementById('start-btn');
-  const stopBtn   = document.getElementById('stop-btn');
   const transcript= document.getElementById('transcript');
   let livePartialBubble = null;
   let followTranscript = true;
@@ -365,11 +356,13 @@
   debugToggle.onclick = () => debugPanel.classList.toggle('open');
   // live config eased toward the target state's WOBBLE — no hard snap.
   let curCfg = { ...WOBBLE.idle };
+  // Caption text per state — idle invites the tap; others show the state.
+  const CAPTION = { idle: 'tap to wake' };
   function setState(s) {
     if (s === auraState) return;
     auraState = s;
     isi.dataset.state = s;
-    subEl.textContent = s;
+    subEl.textContent = CAPTION[s] || s;
 
     // special handling for 'waking' chain
     if (s === 'waking') {
@@ -550,8 +543,6 @@
 
       socket.onopen=()=>{
         setState('waking');
-        startBtn.classList.add('hidden');
-        stopBtn.classList.remove('hidden');
         if(rafId){ cancelAnimationFrame(rafId); rafId=null; }  // stop idle loop
         animate();                                             // start reactive loop
       };
@@ -675,14 +666,14 @@
     analyser=micAnalyser=null;
     smoothLevel=0;
     auraState='';                 // force setState to re-apply
-    setState('idle');
-    subEl.textContent='asleep';
+    setState('idle');             // caption -> 'tap to wake'
     idleAnimate();                // resume idle wobble loop
-    startBtn.classList.remove('hidden');
-    stopBtn.classList.add('hidden');
   }
 
-  startBtn.onclick=startVoice;
-  stopBtn.onclick=stopVoice;
+  // Orb is the toggle: tap while asleep to wake, tap while awake to sleep.
+  isi.addEventListener('click', () => {
+    if (auraState === 'idle') startVoice();
+    else stopVoice();
+  });
 </script>
 {% endblock %}

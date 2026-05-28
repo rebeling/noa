@@ -17,14 +17,11 @@ shared_tts = SynthesisService()
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    # Warm Kokoro in a thread so boot stays non-blocking. First user
-    # session then hits a hot model. Exposed on app.state so the
-    # voice endpoint can hand it to the orchestrator.
+    # Warm Kokoro in a thread so boot stays non-blocking. warmup() runs a
+    # tiny synth so the ONNX graph is hot; the first user session then hits
+    # a warm model. No greeting is precached — the orchestrator picks a
+    # random greeting per session and synthesizes it on demand.
     await asyncio.to_thread(shared_tts.warmup)
-    # Run one synth to fully warm the model graph (result discarded).
-    # The session greeting is NOT fixed — the orchestrator picks a random
-    # greeting per session in the session language, so we don't cache one.
-    await asyncio.to_thread(shared_tts.precache, "Hi, how can I help?")
     app_.state.shared_tts = shared_tts
     yield
 
