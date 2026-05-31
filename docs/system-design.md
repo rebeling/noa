@@ -82,3 +82,9 @@ This document outlines a modular, scalable architecture for building a voice AI 
 
 ## Summary
 This architecture separates concerns into modular services—audio capture, VAD/turn detection, ASR, dialogue management, knowledge retrieval and response synthesis—enabling you to swap components as better models emerge.
+
+---
+
+## Diagrams
+*   [Overall Structure](./diagram-structure.md)
+*   [Dialog Flow](./diagram-dialog.md)
