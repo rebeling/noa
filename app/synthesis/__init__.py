@@ -18,7 +18,19 @@ stays cheap regardless of which provider is selected.
 import os
 from collections.abc import AsyncGenerator
 
-__all__ = ["SynthesisService"]
+__all__ = ["SynthesisService", "postprocess_for_speech"]
+
+
+def postprocess_for_speech(text: str) -> str:
+    """Make an LLM reply safe and tight to speak aloud (strip markdown,
+    neutralize URLs/links, drop control chars, collapse whitespace, cap
+    length at a sentence boundary). Pure deterministic string work — no
+    model call. Run on the full reply between the LLM and TTS; streaming
+    is unaffected since the cleaned string is still chunked by
+    synthesize_stream. See app.synthesis._postprocess."""
+    from app.synthesis._postprocess import postprocess_for_speech as _impl
+
+    return _impl(text)
 
 
 _PROVIDER = os.environ.get("NOA_TTS_PROVIDER", "kokoro").lower()

@@ -59,16 +59,12 @@ This document outlines a modular, scalable architecture for building a voice AI 
 *   **Autoscaling:** Runs compute‑heavy services (ASR, TTS, LLM) on GPU nodes. Stateless services (VAD, redaction) can run on CPU.
 *   **Deployment:** Services communicate over gRPC or WebSockets within a Kubernetes cluster.
 
-[📋 View Tasks: Infrastructure](./superpowers/tasks/06-infrastructure.md)
-
 ---
 
 ## 7. Security & Privacy Considerations
 *   **Data isolation:** Cognee’s per‑user, per‑dataset storage ensures that customers cannot access another user’s data.
 *   **End‑to‑end encryption:** Use TLS for client–server communication and encrypt data at rest.
 *   **Model licences:** Ensure that the selected ASR and TTS models comply with your intended usage (e.g., Canary‑Qwen CC‑BY‑4.0).
-
-[📋 View Tasks: Security & Privacy](./superpowers/tasks/07-security-privacy.md)
 
 ---
 

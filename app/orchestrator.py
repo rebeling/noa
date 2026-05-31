@@ -32,14 +32,18 @@ from app.bus import EventBus
 from app.dialogue import DialogueService
 from app.ingestion import IngestionService
 from app.speech_input import SpeechInputService
-from app.synthesis import SynthesisService
+from app.synthesis import SynthesisService, postprocess_for_speech
 
-# How often the background partial-transcribe loop runs.
-_PARTIAL_POLL_SECS = 0.4
+# How often the background partial-transcribe loop runs. 0.25s keeps
+# partials snappy; Parakeet decodes a window in ~150-500ms on the Apple
+# GPU so the loop stays ahead. (Whisper fallback is slower but still
+# tractable since the window is capped below.)
+_PARTIAL_POLL_SECS = 0.25
 # Below this many bytes of buffered audio, skip a partial transcribe.
-_MIN_PARTIAL_BYTES = 8000
+# 4000 bytes = ~0.125s — surfaces first text sooner than the old 0.25s.
+_MIN_PARTIAL_BYTES = 4000
 # Cap partial-transcribe input to the last N bytes (~6s @ 16kHz int16).
-# Whisper decode time grows with audio length; bounding it keeps partials
+# Decode time grows with audio length; bounding it keeps partials
 # tractable on long turns. Final pass still sees the full buffer.
 _PARTIAL_WINDOW_BYTES = 192000
 # When the live (uncommitted) audio grows past window + slide_step, we
@@ -326,6 +330,10 @@ class DialogueOrchestrator:
                 print("[route] question=False ctx_chars=0")
             t_llm = time.perf_counter()
             reply = await llm_call(text, context)
+            # Make the reply speakable: strip markdown/links, cap length at a
+            # sentence boundary. Pure string work — no added latency. Cleaned
+            # text drives BOTH the on-screen response and TTS so they match.
+            reply = postprocess_for_speech(reply)
             print(f"[llm ] total {(time.perf_counter()-t_llm)*1000:.0f}ms "
                   f"reply_chars={len(reply)}")
             # Hold Speaking status + response text until the first audio

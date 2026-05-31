@@ -5,8 +5,11 @@ using a silence counter. Logic lifted from the prior orchestrator
 session loop so behavior is unchanged.
 """
 
-# ~1s of end-of-turn silence (8 chunks of ~4000 bytes at 16kHz int16).
-_REQUIRED_SILENCE_CHUNKS = 8
+# ~0.75s of end-of-turn silence (6 chunks of ~4000 bytes at 16kHz int16).
+# Lower = the assistant replies sooner after you stop; too low clips
+# natural mid-sentence pauses. 6 trades a little pause-tolerance for a
+# noticeably snappier turn-end than the old 8 (~1s).
+_REQUIRED_SILENCE_CHUNKS = 6
 _SPEECH_START_CONFIDENCE = 0.4
 _SILENCE_CONFIDENCE = 0.2
 
