@@ -9,6 +9,8 @@ the server boots fast. VAD and TurnDetector are pure-Python and light,
 so they import at module scope.
 """
 
+import os
+
 from app.contracts import AudioChunk
 from app.speech_input._turn import TurnDetector
 from app.speech_input._vad import AmplitudeVAD
@@ -32,12 +34,22 @@ class SpeechInputService:
         self._language = language if language in _SUPPORTED_LANGS else "en"
 
     def _get_asr(self):
-        """Load the ASR provider on first use. Importing faster_whisper
-        and building the Whisper model are both deferred to here."""
-        if self._asr is None:
-            from app.speech_input._asr import WhisperASR
+        """Load the ASR provider on first use. The heavy model import +
+        construction are deferred to here so boot stays fast.
 
-            self._asr = WhisperASR(language=self._language)
+        NOA_ASR selects the engine: 'parakeet' (default) runs Parakeet
+        TDT v3 on the Apple GPU via MLX; 'whisper' falls back to
+        faster-whisper on CPU (non-Apple-Silicon / debugging)."""
+        if self._asr is None:
+            engine = os.environ.get("NOA_ASR", "parakeet").lower()
+            if engine == "whisper":
+                from app.speech_input._asr import WhisperASR
+
+                self._asr = WhisperASR(language=self._language)
+            else:
+                from app.speech_input._parakeet import ParakeetASR
+
+                self._asr = ParakeetASR(language=self._language)
         return self._asr
 
     def set_language(self, language: str) -> None:
