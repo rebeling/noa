@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 
 from fastapi import WebSocketDisconnect
@@ -122,16 +123,26 @@ def _looks_like_question(text: str) -> bool:
     return first in _QUESTION_WORDS
 
 
-# Wake phrases that mark a spoken turn as "store this as a fact". Everything
-# after the phrase is ingested. Lowercased, matched at the start of the turn.
-_FACT_PREFIXES = (
-    "remember that ",
-    "remember ",
-    "note that ",
-    "merk dir dass ",
-    "merk dir, dass ",
-    "merk dir ",
-    "merke dir ",
+# Wake phrase that marks a spoken turn as "store this as a fact". Everything
+# after the phrase is ingested. Matched case-insensitively at the start of the
+# turn. Built as a regex (not a startswith list) because ASR transcribes the
+# same spoken phrase with varying punctuation/filler — "Merk dir, dass …",
+# "Merke dir: …", "Merk dir mal …" must all match. Groups:
+#   - merk(e) dir  with optional " mal", then optional separator (",", ":",
+#     " dass", " das") before the body.
+#   - remember / note that  (English).
+# ASR (Whisper) mangles the spoken German wake-phrase badly: "merk dir dass"
+# comes back as "Merkt ihr das", "Merk, dir, dass", "Merke dir, dass", etc.
+# So match loosely: merk/merkt/merke  +  dir/ihr  +  optional mal  +  optional
+# dass/das, with stray commas/colons anywhere. English: remember (that) / note
+# that. Trailing separators after the phrase are stripped before the body.
+_FACT_WAKE_RE = re.compile(
+    r"^\s*(?:"
+    r"merk[te]?\s*,?\s*(?:dir|ihr)(?:\s+mal)?\s*,?\s*(?:dass|das)?"  # German + ASR variants
+    r"|remember(?:\s+that)?"                                          # English
+    r"|note\s+that"
+    r")\b[\s,:]*",
+    re.IGNORECASE,
 )
 # Spoken confirmation after a successful fact ingest, per language.
 _FACT_CONFIRM = {
@@ -145,16 +156,22 @@ _FACT_DENIED = {
 }
 
 
+# Background fact-ingest tasks, anchored at module scope so they survive the
+# session that spawned them — a user can hang up right after "merk dir …" and
+# the slow cognify must still finish. Strong refs here keep them from being
+# GC'd mid-flight; the done-callback discards each on completion.
+_bg_ingest_tasks: set[asyncio.Task] = set()
+
+
 def _extract_fact(text: str) -> str | None:
     """If `text` opens with a fact wake-phrase, return the fact body
-    (everything after the phrase). Otherwise None. Crude/swappable."""
-    t = text.strip()
-    low = t.lower()
-    for prefix in _FACT_PREFIXES:
-        if low.startswith(prefix):
-            body = t[len(prefix):].strip()
-            return body or None
-    return None
+    (everything after the phrase). Otherwise None. Tolerant of ASR
+    punctuation/word mangling — see _FACT_WAKE_RE."""
+    m = _FACT_WAKE_RE.match(text)
+    if not m:
+        return None
+    body = text[m.end():].strip().lstrip(",:; ").strip()
+    return body or None
 
 
 def _is_open(ws) -> bool:
@@ -356,23 +373,27 @@ class DialogueOrchestrator:
 
         async def _handle_fact(fact: str) -> None:
             """Ingest a spoken fact into the user's cognee graph (admin
-            only). Redaction happens inside ingestion.ingest — no bypass.
-            Confirms or refuses by voice."""
+            only). Confirms or refuses by voice."""
             if role != "admin":
                 print(f"[fact ] denied role={role}")
                 await _speak(_FACT_DENIED.get(session_lang, _FACT_DENIED["en"]))
                 return
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Processing..."}))
-            try:
+            # cognify takes seconds; don't block the turn on it. Confirm by
+            # voice now and ingest in the background. ingest_fact merges the
+            # fact into existing entities (see IngestionService.ingest_fact).
+            async def _bg_ingest() -> None:
                 t0 = time.perf_counter()
-                await ingestion.ingest(fact, user_id, dataset_name)
-                print(f"[fact ] ingested chars={len(fact)} "
-                      f"{(time.perf_counter()-t0)*1000:.0f}ms")
-                await _speak(_FACT_CONFIRM.get(session_lang, _FACT_CONFIRM["en"]))
-            except Exception as e:  # noqa: BLE001
-                print(f"[fact ] ingest failed: {e}")
-                await _speak(_FACT_CONFIRM.get(session_lang, _FACT_CONFIRM["en"]))
+                try:
+                    await ingestion.ingest_fact(fact, user_id, dataset_name)
+                    print(f"[fact ] ingested chars={len(fact)} "
+                          f"{(time.perf_counter()-t0)*1000:.0f}ms")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[fact ] ingest failed: {e}")
+
+            task = asyncio.create_task(_bg_ingest())
+            _bg_ingest_tasks.add(task)
+            task.add_done_callback(_bg_ingest_tasks.discard)
+            await _speak(_FACT_CONFIRM.get(session_lang, _FACT_CONFIRM["en"]))
 
         async def _delayed_reply(text: str) -> None:
             """Mode-switching wrapper. NOA_REPLY_MODE picks fake/echo/real.

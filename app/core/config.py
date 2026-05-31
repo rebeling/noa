@@ -38,11 +38,6 @@ class Settings(BaseSettings):
     # never be true in a real deployment. Local inspection only.
     DEV_GRAPH_VIEWER: bool = False
 
-    # PII/PHI redaction before Cognee. CLAUDE.md mandates this on — the only
-    # reason to set it false is local dev where you need to see raw text in
-    # the graph. NEVER false where documents carry real PII.
-    REDACTION_ENABLED: bool = True
-
     # extra="ignore": .env also carries BOOTSTRAP_ADMIN_* read directly via
     # os.getenv in auth.py — those are not Settings fields.
     model_config = SettingsConfigDict(

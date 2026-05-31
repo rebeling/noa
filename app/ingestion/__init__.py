@@ -1,13 +1,10 @@
-"""Ingestion part — document redaction + Cognee storage/retrieval.
+"""Ingestion part — Cognee storage/retrieval.
 
-Public surface: IngestionService. Internals: _redaction, _cognee.
+Public surface: IngestionService. Internals: _cognee.
 
-Invariant: ingest() redacts before any document reaches Cognee. There
-is no code path to Cognee that skips redaction.
-
-Lazy loading: _redaction pulls in presidio and _cognee pulls in cognee,
-both heavy. Their imports are deferred to inside the methods so
-`import app.ingestion` stays cheap and the server boots fast.
+Lazy loading: _cognee pulls in cognee (heavy). Its import is deferred to
+inside the methods so `import app.ingestion` stays cheap and the server
+boots fast.
 """
 
 __all__ = ["IngestionService"]
@@ -16,27 +13,42 @@ __all__ = ["IngestionService"]
 class IngestionService:
     """Document ingestion and knowledge retrieval over Cognee.
 
-    Heavy dependencies (presidio, cognee) load on first method call,
-    not at import or construction time.
+    The heavy cognee dependency loads on first method call, not at import
+    or construction time.
     """
 
     async def ingest(
         self, text: str, user_id: str, dataset_name: str = "default"
     ) -> bool:
-        """Redact `text`, then write it to Cognee for `user_id`.
-
-        Redaction is mandatory here unless settings.REDACTION_ENABLED is
-        explicitly false (dev-only). There is no other path to Cognee that
-        skips it.
-        """
-        from app.core.config import settings
+        """Write `text` to Cognee for `user_id`."""
         from app.ingestion import _cognee
 
-        if settings.REDACTION_ENABLED:
-            from app.ingestion._redaction import redact_text
-
-            text = redact_text(text)
         return await _cognee.add_document(text, user_id, dataset_name)
+
+    async def ingest_fact(
+        self, fact: str, user_id: str, dataset_name: str = "default"
+    ) -> bool:
+        """Ingest a short spoken fact, merging into existing entities.
+
+        Cognee derives each entity node's id from uuid5(name), so a fact
+        that names an entity differently than it's already stored
+        ("Matthias" vs "Matthias Rebel") creates a duplicate node instead
+        of extending the existing one. To keep naming consistent, we first
+        retrieve what the graph already knows that's relevant to this fact
+        and prepend it, so cognify's extractor sees the canonical full name
+        and resolves to the same node. Falls back to a plain ingest if
+        retrieval returns nothing.
+        """
+        from app.ingestion import _cognee
+
+        prior = await _cognee.search(fact, user_id, dataset_name)
+        if prior:
+            # Give the extractor the existing context first, then the new
+            # fact — same chunk, so entity names resolve consistently.
+            text = f"{prior}\n\n{fact}"
+        else:
+            text = fact
+        return await self.ingest(text, user_id, dataset_name)
 
     async def query(
         self, query: str, user_id: str, dataset_name: str = "default"

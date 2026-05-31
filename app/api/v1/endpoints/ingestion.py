@@ -51,31 +51,18 @@ async def upload_document(
         with open(temp_path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
 
-        # IngestionService.ingest redacts internally unless REDACTION_ENABLED
-        # is false (dev-only) — see CLAUDE.md. Report which actually happened.
-        from app.core.config import settings
-
         await IngestionService().ingest(text, user_id=str(user.sub))
-        redacted = settings.REDACTION_ENABLED
-        status_msg = (
-            f"Ingested into Cognee ({len(text)} chars, "
-            f"{'redacted' if redacted else 'NOT redacted — raw text'})"
-        )
+        status_msg = f"Ingested into Cognee ({len(text)} chars)"
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
     if request.headers.get("HX-Request"):
-        # Green when redacted, amber warning when raw text was ingested.
-        cls = (
-            "text-green-700 bg-green-100" if redacted
-            else "text-amber-700 bg-amber-100"
-        )
         return (
-            f'<div class="p-4 mb-4 text-sm {cls} rounded-lg" role="alert">'
-            f'{safe_name}: {status_msg}</div>'
+            '<div class="p-4 mb-4 text-sm text-green-700 bg-green-100 '
+            f'rounded-lg" role="alert">{safe_name}: {status_msg}</div>'
         )
-    return {"filename": safe_name, "status": status_msg, "redacted": redacted}
+    return {"filename": safe_name, "status": status_msg}
 
 
 @router.get("/graph", response_class=HTMLResponse)

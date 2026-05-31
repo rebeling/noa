@@ -12,29 +12,49 @@ _SUPPORTED_LANGS = {"en", "de"}
 
 
 class WhisperASR(ASRProvider):
+    """Two-model ASR: 'tiny' greedy for live partials (must stay realtime),
+    'small' beam-search for the FINAL transcript only.
+
+    Rationale: partials fire many times per turn and gate barge-in, so they
+    need RTF < 1 — 'tiny' delivers that. The final transcript runs once per
+    turn and feeds fact ingest + the LLM, where 'tiny' garbled German
+    ("merk dir dass" -> "Merkt ihr das") and broke wake-phrase matching.
+    'small' runs there: one slow decode per turn is acceptable; per-partial
+    latency is not. The 'small' model loads lazily on the first final so a
+    pure-partial warmup never pays for it."""
+
     def __init__(self, language: str = "en") -> None:
-        # 'tiny' keeps RTF < 1 on CPU; 'base' was ~7x realtime, unusable
-        # for live partials. Accuracy hit is acceptable for short turns.
-        self._model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        self._fast = WhisperModel("tiny", device="cpu", compute_type="int8")
+        self._accurate = None  # 'small', built lazily on first final
         self._language = language if language in _SUPPORTED_LANGS else "en"
+
+    def _get_accurate(self):
+        if self._accurate is None:
+            self._accurate = WhisperModel(
+                "small", device="cpu", compute_type="int8"
+            )
+        return self._accurate
 
     def set_language(self, language: str) -> None:
         if language in _SUPPORTED_LANGS:
             self._language = language
 
     def transcribe(self, audio: bytes, partial: bool) -> str:
-        """Transcribe raw PCM int16 bytes. Greedy decoding and disabled
-        cross-segment conditioning keep latency bounded; `partial=True`
-        drops timestamps for the live partial path."""
+        """Transcribe raw PCM int16 bytes. Partials use the fast 'tiny'
+        model with greedy decoding; the final uses 'small' with beam search
+        for accuracy. `partial=True` also drops timestamps."""
         audio_int16 = np.frombuffer(audio, dtype=np.int16)
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
         audio_secs = len(audio_float32) / 16000.0
 
+        model = self._fast if partial else self._get_accurate()
+        beam_size = 1 if partial else 5
+
         t0 = time.perf_counter()
-        segments, _info = self._model.transcribe(
+        segments, _info = model.transcribe(
             audio_float32,
             language=self._language,
-            beam_size=1,
+            beam_size=beam_size,
             condition_on_previous_text=False,
             vad_filter=True,
             without_timestamps=partial,

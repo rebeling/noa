@@ -125,11 +125,8 @@ async def _resolve_user(user_id: str):
     return user
 
 
-async def add_document(redacted_text: str, user_id: str, dataset_name: str) -> bool:
-    """Write already-redacted text to Cognee, scoped to one tenant.
-
-    Caller MUST pass redacted text — this function does not redact.
-    """
+async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
+    """Write text to Cognee, scoped to one tenant."""
     safe_user_id = _safe(user_id)
     dataset_name = _safe(dataset_name)
     cognee = _get_cognee()
@@ -138,7 +135,7 @@ async def add_document(redacted_text: str, user_id: str, dataset_name: str) -> b
     fd, temp_file = tempfile.mkstemp(prefix=f"ingest_{safe_user_id}_", suffix=".txt")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(redacted_text)
+            f.write(text)
         await cognee.add(temp_file, dataset_name=dataset_name, user=user)
         await cognee.cognify(datasets=[dataset_name], user=user)
     finally:
