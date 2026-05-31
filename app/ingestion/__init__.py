@@ -53,10 +53,18 @@ class IngestionService:
     async def query(
         self, query: str, user_id: str, dataset_name: str = "default"
     ) -> str:
-        """Search a tenant's knowledge graph."""
+        """Search a tenant's memory and return only context text."""
         from app.ingestion import _cognee
 
         return await _cognee.search(query, user_id, dataset_name)
+
+    async def query_with_meta(
+        self, query: str, user_id: str, dataset_name: str = "default"
+    ):
+        """Search a tenant's memory with routing and timing metadata."""
+        from app.ingestion import _cognee
+
+        return await _cognee.query_with_meta(query, user_id, dataset_name)
 
     async def visualize(
         self, user_id: str, dataset_name: str = "default"

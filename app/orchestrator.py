@@ -320,12 +320,17 @@ class DialogueOrchestrator:
             context: str | None = None
             is_question = _looks_like_question(text)
             if is_question:
-                t_q = time.perf_counter()
-                result = await ingestion.query(text, user_id, dataset_name)
-                context = result or None
+                result = await ingestion.query_with_meta(
+                    text, user_id, dataset_name
+                )
+                context = result.context or None
                 print(f"[route] question=True "
                       f"ctx_chars={len(context or '')} "
-                      f"{(time.perf_counter()-t_q)*1000:.0f}ms")
+                      f"{result.elapsed_ms}ms "
+                      f"source={result.source} intent={result.intent} "
+                      f"search_type={result.search_type or '-'} "
+                      f"hits={result.hit_count} "
+                      f"fallback={result.fallback_used}")
             else:
                 print("[route] question=False ctx_chars=0")
             t_llm = time.perf_counter()
