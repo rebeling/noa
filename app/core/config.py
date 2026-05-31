@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     ENABLE_BACKEND_ACCESS_CONTROL: bool = True
     REQUIRE_AUTHENTICATION: bool = True
 
+    # Dev-only: expose the unauthenticated graph viewer at
+    # GET /ingestion/graph. Off by default — this bypasses RBAC, so it must
+    # never be true in a real deployment. Local inspection only.
+    DEV_GRAPH_VIEWER: bool = False
+
+    # PII/PHI redaction before Cognee. CLAUDE.md mandates this on — the only
+    # reason to set it false is local dev where you need to see raw text in
+    # the graph. NEVER false where documents carry real PII.
+    REDACTION_ENABLED: bool = True
+
     # extra="ignore": .env also carries BOOTSTRAP_ADMIN_* read directly via
     # os.getenv in auth.py — those are not Settings fields.
     model_config = SettingsConfigDict(

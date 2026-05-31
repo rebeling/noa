@@ -19,9 +19,21 @@ def _safe_user(raw: str) -> str:
     cleaned = cleaned.strip("_")
     return cleaned or "dev"
 
+def _ingestion_context(request: Request, title: str) -> dict:
+    # Dev-only: mint an admin JWT so the htmx upload form can authenticate
+    # against require_role("admin") without a login UI — same dev-token
+    # pattern as the voice page. Not production auth.
+    return {
+        "request": request,
+        "title": title,
+        "page": "ingestion",
+        "admin_token": create_access_token(subject="dev", role="admin"),
+    }
+
+
 @router.get("/ingestion", response_class=HTMLResponse)
 async def ingestion_page(request: Request):
-    return templates.TemplateResponse(request, "ingestion.html", {"title": "Ingestion", "page": "ingestion"})
+    return templates.TemplateResponse(request, "ingestion.html", _ingestion_context(request, "Ingestion"))
 
 @router.get("/voice", response_class=HTMLResponse)
 async def voice_page(request: Request, user: str = "dev", role: str = "admin"):
@@ -48,4 +60,10 @@ async def voice_page(request: Request, user: str = "dev", role: str = "admin"):
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse(request, "ingestion.html", {"title": "Dashboard", "page": "ingestion"})
+    return templates.TemplateResponse(request, "ingestion.html", _ingestion_context(request, "Dashboard"))
+
+@router.get("/graph", response_class=HTMLResponse)
+async def graph_page(request: Request):
+    # App-chrome wrapper: keeps the nav and iframes the raw graph HTML from
+    # /api/v1/ingestion/graph, so the visualization shows inside the app.
+    return templates.TemplateResponse(request, "graph.html", {"title": "Knowledge Graph", "page": "graph"})

@@ -53,6 +53,15 @@ def _get_cognee():
     if not _cognee_configured:
         from app.core.config import settings
 
+        # cognee reads access control from os.environ, not our Settings object
+        # (see cognee.context_global_variables.backend_access_control_enabled).
+        # Export the setting so the per-tenant isolation CLAUDE.md mandates is
+        # enforced from our config — never left to whether .env happened to set
+        # the bare env var.
+        os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] = (
+            "true" if settings.ENABLE_BACKEND_ACCESS_CONTROL else "false"
+        )
+
         base = os.path.join(os.getcwd(), ".cognee_data")
         data_dir = os.path.join(base, "data")
         system_dir = os.path.join(base, "system")
@@ -166,3 +175,37 @@ async def search(query: str, user_id: str, dataset_name: str) -> str:
     except Exception as e:  # noqa: BLE001
         print(f"Cognee search error: {e}")
         return ""
+
+
+async def visualize(user_id: str, dataset_name: str) -> str:
+    """Render one tenant's knowledge graph as a standalone HTML page.
+
+    Scoped to (user, dataset) via cognee's multi-user visualizer so the
+    output respects the same per-tenant isolation as add/search — never
+    the global graph. Returns the HTML string; raises if the dataset
+    doesn't exist for this user (caller maps that to a 404).
+    """
+    dataset_name = _safe(dataset_name)
+    _get_cognee()
+    await _ensure_tables()
+    from cognee.api.v1.visualize import visualize_multi_user_graph
+    from cognee.modules.data.methods import get_datasets_by_name
+
+    user = await _resolve_user(user_id)
+    datasets = await get_datasets_by_name(dataset_name, user.id)
+    if not datasets:
+        raise ValueError(f"No dataset {dataset_name!r} for this user")
+    return await visualize_multi_user_graph([(user, datasets[0])])
+
+
+async def reset() -> None:
+    """Wipe ALL cognee data — every tenant's documents, graph and vectors.
+
+    Global, not per-tenant: this is a dev reset, not a delete-my-dataset.
+    Also clears the resolved-user cache so subsequent calls re-create users.
+    """
+    cognee = _get_cognee()
+    await _ensure_tables()
+    await cognee.prune.prune_data()
+    await cognee.prune.prune_system(graph=True, vector=True, metadata=True)
+    _user_cache.clear()

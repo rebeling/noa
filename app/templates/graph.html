@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="bg-white shadow rounded-lg overflow-hidden" style="height: calc(100vh - 7rem);">
+    <iframe src="/api/v1/ingestion/graph"
+            title="Knowledge Graph"
+            class="w-full h-full"
+            style="border:0;"></iframe>
+</div>
+{% endblock %}
