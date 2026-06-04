@@ -411,6 +411,13 @@ async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
     return True
 
 
+# Search types cognee threads session history through (per cognee docs:
+# only GRAPH_COMPLETION / RAG_COMPLETION / TRIPLET_COMPLETION use sessions).
+# When the session experiment is on we force fact-style intents onto
+# GRAPH_COMPLETION so a session_id actually carries conversation memory.
+_SESSION_SEARCH_TYPE = "GRAPH_COMPLETION"
+
+
 async def _search_cognee(
     query: str,
     user: object,
@@ -418,11 +425,17 @@ async def _search_cognee(
     intent: str,
     *,
     use_recall: bool = True,
+    session_id: str | None = None,
 ) -> tuple[str, str, int]:
     cognee = _get_cognee()
     from cognee.modules.search.types import SearchType
 
-    if intent == "exact_lookup":
+    # Session experiment: route to GRAPH_COMPLETION (a session-eligible type)
+    # so the passed session_id threads prior Q&A into the prompt. Otherwise
+    # keep the latency-cheap per-intent routing.
+    if session_id is not None:
+        search_type = SearchType.GRAPH_COMPLETION
+    elif intent == "exact_lookup":
         search_type = SearchType.CHUNKS_LEXICAL
     elif intent == "summary":
         search_type = SearchType.GRAPH_SUMMARY_COMPLETION
@@ -436,6 +449,9 @@ async def _search_cognee(
         search_type = SearchType.CHUNKS_LEXICAL
 
     top_k = 3 if search_type == SearchType.CHUNKS_LEXICAL else 5
+    # session_id is only meaningful on cognee.search/recall when caching is
+    # on; passed through unconditionally — cognee ignores it for non-session
+    # search types and degrades gracefully if no cache backend exists.
     if use_recall and hasattr(cognee, "recall"):
         results = await cognee.recall(
             query_text=query,
@@ -445,6 +461,7 @@ async def _search_cognee(
             only_context=True,
             top_k=top_k,
             auto_route=False,
+            session_id=session_id,
         )
     else:
         results = await cognee.search(
@@ -454,6 +471,7 @@ async def _search_cognee(
             user=user,
             only_context=True,
             top_k=top_k,
+            session_id=session_id,
         )
     parts = [_result_text(r) for r in (results or [])]
     parts = [part for part in parts if part]
@@ -481,30 +499,37 @@ def _result_text(result: object) -> str:
 
 
 async def query_with_meta(
-    query: str, user_id: str, dataset_name: str
+    query: str, user_id: str, dataset_name: str, session_id: str | None = None
 ) -> KnowledgeQueryResult:
-    """Retrieve memory context with source, intent and timing metadata."""
+    """Retrieve memory context with source, intent and timing metadata.
+
+    When `session_id` is set (the cognee-sessions experiment), the local
+    lexical fast path and the per-query cache are bypassed: both would
+    short-circuit the cognee call that threads conversation history, so a
+    session turn always goes through GRAPH_COMPLETION on the cognee side.
+    """
     t0 = time.perf_counter()
     safe_user_id = _safe(user_id)
     dataset_name = _safe(dataset_name)
     intent = _classify_intent(query)
     normalized_query = _normalize_query(query)
     cache_key = (safe_user_id, dataset_name, normalized_query)
-    cached = _query_cache.get(cache_key)
-    if cached is not None:
-        return KnowledgeQueryResult(
-            context=cached.context,
-            source="local_cache",
-            intent=cached.intent,
-            elapsed_ms=int((time.perf_counter() - t0) * 1000),
-            search_type=cached.search_type,
-            dataset_name=cached.dataset_name,
-            hit_count=cached.hit_count,
-            fallback_used=cached.fallback_used,
-        )
+    if session_id is None:
+        cached = _query_cache.get(cache_key)
+        if cached is not None:
+            return KnowledgeQueryResult(
+                context=cached.context,
+                source="local_cache",
+                intent=cached.intent,
+                elapsed_ms=int((time.perf_counter() - t0) * 1000),
+                search_type=cached.search_type,
+                dataset_name=cached.dataset_name,
+                hit_count=cached.hit_count,
+                fallback_used=cached.fallback_used,
+            )
 
     try:
-        if _should_try_local(intent):
+        if session_id is None and _should_try_local(intent):
             owner_id = _existing_user_db_id(safe_user_id)
             if owner_id is not None:
                 index = _load_local_index(safe_user_id, dataset_name, owner_id)
@@ -530,6 +555,10 @@ async def query_with_meta(
             "temporal",
             "summary",
         }
+        # In session mode, even open questions go to cognee so the session
+        # thread sees every turn — otherwise follow-ups lose continuity.
+        if session_id is not None:
+            should_fallback = True
         if not should_fallback:
             return KnowledgeQueryResult(
                 context="",
@@ -544,11 +573,12 @@ async def query_with_meta(
 
         user = await _resolve_user(user_id)
         context, search_type, hit_count = await _search_cognee(
-            query, user, dataset_name, intent
+            query, user, dataset_name, intent, session_id=session_id
         )
         result = KnowledgeQueryResult(
             context=context,
-            source="cognee_recall" if context else "miss",
+            source="cognee_session" if session_id else (
+                "cognee_recall" if context else "miss"),
             intent=intent,
             elapsed_ms=int((time.perf_counter() - t0) * 1000),
             search_type=search_type,
@@ -556,7 +586,10 @@ async def query_with_meta(
             hit_count=hit_count,
             fallback_used=True,
         )
-        _query_cache[cache_key] = result
+        # Don't cache session turns: a cache hit on a later identical query
+        # would skip the cognee call and lose session threading.
+        if session_id is None:
+            _query_cache[cache_key] = result
         return result
     except Exception as e:  # noqa: BLE001
         print(f"Cognee search error: {e}")

@@ -16,6 +16,9 @@ import os
 import random
 import re
 import time
+import uuid
+
+from app.core.config import settings
 
 from fastapi import WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -237,6 +240,14 @@ class DialogueOrchestrator:
         # the closures read so a mid-session switch reaches fact confirm/deny.
         session_lang = language
 
+        # cognee-sessions experiment: one session id per WebSocket connection,
+        # scoped to the tenant so threads never cross users. None when the
+        # toggle is off → retrieval keeps its default (lexical) path.
+        cognee_session_id = (
+            f"noa_{user_id}_{uuid.uuid4().hex[:8]}"
+            if settings.COGNEE_SESSIONS else None
+        )
+
         # --- event handlers: parts never call each other directly ---
         async def on_partial(event: PartialTranscript) -> None:
             # event.text is the tail (last window). committed_text is
@@ -321,7 +332,8 @@ class DialogueOrchestrator:
             is_question = _looks_like_question(text)
             if is_question:
                 result = await ingestion.query_with_meta(
-                    text, user_id, dataset_name
+                    text, user_id, dataset_name,
+                    session_id=cognee_session_id,
                 )
                 context = result.context or None
                 print(f"[route] question=True "

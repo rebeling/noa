@@ -55,12 +55,22 @@ class IngestionService:
         return await _cognee.search(query, user_id, dataset_name)
 
     async def query_with_meta(
-        self, query: str, user_id: str, dataset_name: str = "default"
+        self,
+        query: str,
+        user_id: str,
+        dataset_name: str = "default",
+        session_id: str | None = None,
     ):
-        """Search a tenant's memory with routing and timing metadata."""
+        """Search a tenant's memory with routing and timing metadata.
+
+        Pass `session_id` to thread cognee conversational sessions (the
+        COGNEE_SESSIONS experiment); None keeps the default retrieval path.
+        """
         from app.ingestion import _cognee
 
-        return await _cognee.query_with_meta(query, user_id, dataset_name)
+        return await _cognee.query_with_meta(
+            query, user_id, dataset_name, session_id=session_id
+        )
 
     async def visualize(
         self, user_id: str, dataset_name: str = "default"
