@@ -14,9 +14,18 @@ _PERSONA_NAME = "Noa"
 # Map a session language code to the name used in the prompt directive.
 _LANG_NAMES = {"de": "German", "en": "English"}
 
+# The wake-phrase a user speaks to store a fact, per language. Must match the
+# phrases the orchestrator's _FACT_WAKE_RE actually triggers on, so Noa never
+# tells a user a phrasing that won't fire ingestion.
+_MEMORY_PHRASE = {
+    "de": '"Merk dir, dass ..."',
+    "en": '"Remember that ..." (or "Note that ...")',
+}
+
 
 def _system_prompt(language: str) -> str:
     lang_name = _LANG_NAMES.get(language, "English")
+    memory_phrase = _MEMORY_PHRASE.get(language, _MEMORY_PHRASE["en"])
     today = date.today().isoformat()
     return f"""
 Your name is {_PERSONA_NAME}.
@@ -30,6 +39,15 @@ Follow these rules strictly:
    - Never say "asterisk" or "bold".
    - Do not mention being an AI or large language model.
 5. Language: Always answer in {lang_name}, regardless of the input language.
+6. Memory: You can remember facts and recall them later.
+   - Storing: a user stores a fact by prefixing it with {memory_phrase}.
+     That exact phrasing is what commits it to your long-term memory.
+   - Recognising intent: when someone clearly wants you to remember
+     something (e.g. "you should know that ...", "for the future ...",
+     "don't forget ...") but did NOT use that phrasing, briefly tell them
+     to say {memory_phrase} followed by the fact, so it actually gets stored.
+   - If asked whether you can remember things, say yes and explain how.
+     Never claim you cannot retain information.
 """
 
 

@@ -32,23 +32,19 @@ class IngestionService:
 
         Cognee derives each entity node's id from uuid5(name), so a fact
         that names an entity differently than it's already stored
-        ("Matthias" vs "Matthias Rebel") creates a duplicate node instead
-        of extending the existing one. To keep naming consistent, we first
-        retrieve what the graph already knows that's relevant to this fact
-        and prepend it, so cognify's extractor sees the canonical full name
-        and resolves to the same node. Falls back to a plain ingest if
-        retrieval returns nothing.
-        """
-        from app.ingestion import _cognee
+        ("Matthias" vs "Matthias Rebel") risks a duplicate node. Entity
+        resolution is exactly what remember()'s Improve pass does — it
+        reconciles new facts against the existing graph. So this is now a
+        plain ingest; the merging happens inside cognee.
 
-        prior = await _cognee.search(fact, user_id, dataset_name)
-        if prior:
-            # Give the extractor the existing context first, then the new
-            # fact — same chunk, so entity names resolve consistently.
-            text = f"{prior}\n\n{fact}"
-        else:
-            text = fact
-        return await self.ingest(text, user_id, dataset_name)
+        (An earlier version retrieved prior context and prepended it to the
+        fact to "prime" the extractor. That fed search output back into
+        ingestion: cognee's recall returns chunks whose text can already
+        contain a stringified search-result dict, which then got re-stored
+        as a fact, compounding every turn until the real fact was buried.
+        Don't reintroduce that loop.)
+        """
+        return await self.ingest(fact, user_id, dataset_name)
 
     async def query(
         self, query: str, user_id: str, dataset_name: str = "default"

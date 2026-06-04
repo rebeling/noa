@@ -9,7 +9,6 @@ import os
 import re
 import secrets
 import sqlite3
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -394,21 +393,20 @@ def _local_hit_is_strong(hits: list[_LocalHit], intent: str) -> bool:
 
 
 async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
-    """Write text to Cognee, scoped to one tenant."""
+    """Write text to Cognee, scoped to one tenant.
+
+    Uses the v1.0 remember() entry point: it runs the full ingestion
+    pipeline (normalize → graph → embed) and an Improve pass that resolves
+    each fact's entities against what the graph already knows. That entity
+    resolution is what the old add→cognify path tried to fake by prepending
+    prior search results — a loop that re-ingested stringified search dumps
+    as facts and poisoned the graph. remember() makes that hack unnecessary.
+    """
     safe_user_id = _safe(user_id)
     dataset_name = _safe(dataset_name)
     cognee = _get_cognee()
     user = await _resolve_user(user_id)
-    # Generated temp path — tenant identifiers never build the filename.
-    fd, temp_file = tempfile.mkstemp(prefix=f"ingest_{safe_user_id}_", suffix=".txt")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        await cognee.add(temp_file, dataset_name=dataset_name, user=user)
-        await cognee.cognify(datasets=[dataset_name], user=user)
-    finally:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+    await cognee.remember(text, dataset_name=dataset_name, user=user)
     _invalidate_local_cache(safe_user_id, dataset_name)
     return True
 
@@ -610,6 +608,11 @@ async def reset() -> None:
     await _ensure_tables()
     await cognee.prune.prune_data()
     await cognee.prune.prune_system(graph=True, vector=True, metadata=True)
+    # prune_system drops the relational schema, so the cached "tables exist"
+    # flag is now a lie — the next user lookup would hit 'no such table:
+    # principals'. Clear it so _ensure_tables rebuilds the schema on next use.
+    global _tables_ready
+    _tables_ready = False
     _user_cache.clear()
     _local_index_cache.clear()
     _query_cache.clear()
