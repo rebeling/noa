@@ -157,6 +157,11 @@ Acceptable; not perfect.
 | `stop_audio` | on cancel | on cancel | client clears playback queue |
 | binary frame (WAV) | — | ✓ | TTS audio for browser WebAudio playback |
 
+## Performance Conclusion
+Reducing first‑chunk latency in a voice agent requires more than just a fast TTS model. It demands an end‑to‑end streaming architecture that overlaps ASR, LLM, TTS and playback. For open‑source, local deployment in English, **Piper and Kokoro** currently provide the fastest first‑chunk performance, delivering audio in under 100–300 ms on commodity hardware.
+
+Whichever model you choose, **stream the LLM output sentence by sentence** and **pre-load the model** to ensure your agent responds as quickly as a human.
+
 ## Tuning knobs
 
 | constant | file | effect |

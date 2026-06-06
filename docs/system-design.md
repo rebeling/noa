@@ -76,6 +76,16 @@ This document outlines a modular, scalable architecture for building a voice AI 
 
 ---
 
+## 9. Performance & Latency
+The system is optimized for low-latency voice interactions. Current performance benchmarks and bottlenecks are tracked in [latency-analysis.md](./latency-analysis.md). Key target metrics include:
+*   **Time to First Audio (TTFA):** Target < 2s (Current: 10-12s).
+*   **ASR RTF:** < 0.2.
+*   **Search Latency:** < 500ms (Current: 4-8s).
+
+[📋 View Tasks: Pipeline Optimizations](./superpowers/tasks/09-pipeline-optimizations.md)
+
+---
+
 ## Summary
 This architecture separates concerns into modular services—audio capture, VAD/turn detection, ASR, dialogue management, knowledge retrieval and response synthesis—enabling you to swap components as better models emerge.
 

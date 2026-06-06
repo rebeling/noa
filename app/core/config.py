@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:8000"]
 
     OPENAI_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
+
+    # LLM model for dialogue responses. A "claude-*" id routes to the
+    # Anthropic provider; anything else routes to OpenAI. Override in .env
+    # (LLM_MODEL=...) to A/B the two without touching code.
+    LLM_MODEL: str = "gpt-4o-mini"
 
     # Bootstrap admin (Phase 1, no DB). Password is stored only as a
     # bcrypt hash; login fails closed if either is unset.

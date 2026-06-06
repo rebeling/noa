@@ -85,14 +85,39 @@
     position: absolute;
     width: 80%; height: 80%;
     border-radius: 50%;
-    border: 1px solid var(--ring, rgba(120,200,220,.22));
-    opacity: .25;
+    border: 2px solid var(--ring, rgba(120,200,220,.22));
+    opacity: .18;
     pointer-events: none;
+    filter: blur(6px);
     animation: ring-breathe 9s ease-in-out infinite;
   }
+
+  /* processing ring: a rotating, dashed outer boundary that appears
+     only when Noa is thinking. Gives a mechanical/scanning feel. */
+  .proc-ring {
+    position: absolute;
+    width: 86%; height: 86%;
+    border-radius: 50%;
+    border: 2px dashed var(--ring);
+    opacity: 0;
+    transform: scale(0.85);
+    filter: blur(4px);
+    pointer-events: none;
+    transition: all 0.7s cubic-bezier(.2, .8, .2, 1);
+  }
+  .noa-wrap[data-state="processing"] .proc-ring {
+    opacity: 0.35;
+    transform: scale(1.04);
+    animation: proc-spin 10s linear infinite;
+  }
+  @keyframes proc-spin {
+    from { transform: scale(1.04) rotate(0deg); }
+    to   { transform: scale(1.04) rotate(360deg); }
+  }
+
   @keyframes ring-breathe {
-    0%,100% { transform: scale(.92); opacity: .15; }
-    50%     { transform: scale(1.06); opacity: .35; }
+    0%,100% { transform: scale(.92); opacity: .1; }
+    50%     { transform: scale(1.06); opacity: .24; }
   }
   @keyframes halo-in {
     0%   { transform: scale(1.6); opacity: 0; }
@@ -129,11 +154,11 @@
     width: 250px; height: 250px;
     display: grid; place-items: center;
     filter: blur(7px) drop-shadow(0 0 70px var(--glow, rgba(80,200,220,.5)));
-    transition: filter 1.1s ease;
+    transition: filter 1.2s ease;
     will-change: transform;
   }
   .core svg { width: 100%; height: 100%; overflow: visible; }
-  .blob-path { transition: fill 1.1s ease; }  /* d is set per-frame by JS */
+  .blob-path { transition: fill 1.2s ease; }  /* d is set per-frame by JS */
   /* glassy specular highlight — a small bright offset disc that sells
      the plasma as a 3D volume catching light from upper-left. */
   .core::after {
@@ -297,6 +322,7 @@
 
   <div class="noa-wrap" id="isi" data-state="idle">
     <div class="halo-ring"></div>
+    <div class="proc-ring"></div>
     <div class="halo"></div>
 
     <div class="core-sway">
@@ -398,6 +424,9 @@
   debugToggle.onclick = () => debugPanel.classList.toggle('open');
   // live config eased toward the target state's WOBBLE — no hard snap.
   let curCfg = { ...WOBBLE.idle };
+  let phase = 0;
+  let lastT = 0;
+
   // Caption text per state — idle invites the tap; others show the state.
   // Transient captions (errors, mic failures) go through setCaption() AFTER
   // the setState() that triggered them, so they win over the state default.
@@ -424,23 +453,33 @@
 
   // build a smooth closed SVG path through wobbled points
   function wobblePath(t, level) {
+    const dt = lastT ? t - lastT : 0;
+    lastT = t;
+
     const tgt = WOBBLE[auraState] || WOBBLE.idle;
-    // ease base/amp/speed toward target every frame -> smooth state morph
-    const morphEase = 0.025;
-    const waveEase = 0.018;
+    // ease base/amp/speed toward target every frame -> smooth state morph.
+    // Significantly slower easing (0.015 instead of 0.04) for a relaxed, 
+    // liquid-like transition between states.
+    const morphEase = 0.015;
+    const waveEase = 0.01;
+
     curCfg.base  += (tgt.base  - curCfg.base)  * morphEase;
     curCfg.amp   += (tgt.amp   - curCfg.amp)   * morphEase;
     curCfg.speed += (tgt.speed - curCfg.speed) * morphEase;
     curCfg.waves += (tgt.waves - curCfg.waves) * waveEase;
+
+    // phase accumulation prevents the "jumping" effect when speed changes
+    phase += dt * curCfg.speed;
+
     const cfg = curCfg;
     const reactGain = auraState==='speaking' ? 34
                     : auraState==='listening' ? 38 : 12;
     const ampNow = cfg.amp + level * reactGain;
     const pts = ANG.map((a) => {
       // lobe SHAPE fixed by angle (a*waves) — peaks stay put, no rotation.
-      // time only breathes the amplitude, so the blob pulses in place.
-      const env  = Math.sin(t*cfg.speed);
-      const env2 = Math.sin(t*cfg.speed*1.7 + 1.3);
+      // phase only breathes the amplitude, so the blob pulses in place.
+      const env  = Math.sin(phase);
+      const env2 = Math.sin(phase * 1.7 + 1.3);
       const w = Math.cos(a*cfg.waves)        * ampNow      * env
               + Math.cos(a*(cfg.waves+1)+.7) * ampNow*.45  * env2;
       const r = cfg.base + w;

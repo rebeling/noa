@@ -6,6 +6,7 @@ of these bases — no other part changes.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncGenerator
 
 from app.contracts.audio import AudioChunk
 
@@ -41,6 +42,18 @@ class LLMProvider(ABC):
         search result) the implementation may ground its answer on. It is
         transient per-turn — implementations must not persist it into
         conversation history.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def respond_stream(
+        self, user_text: str, context: str | None = None
+    ) -> AsyncGenerator[str, None]:
+        """Produce a streaming reply to `user_text` as an async generator
+        yielding text chunks.
+
+        Implementations must handle the same context/history rules as
+        `respond`.
         """
         raise NotImplementedError
 

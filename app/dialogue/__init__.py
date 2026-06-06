@@ -7,6 +7,8 @@ deferred to the first respond() call so `import app.dialogue` stays
 cheap.
 """
 
+from collections.abc import AsyncGenerator
+
 __all__ = ["DialogueService"]
 
 
@@ -22,9 +24,16 @@ class DialogueService:
         """Build the LLM provider on first use. Importing openai and
         constructing the client are both deferred to here."""
         if self._llm is None:
-            from app.dialogue._llm import OpenAILLM
+            from app.core.config import settings
 
-            self._llm = OpenAILLM(language=self._language)
+            if settings.LLM_MODEL.startswith("claude-"):
+                from app.dialogue._claude import ClaudeLLM
+
+                self._llm = ClaudeLLM(language=self._language)
+            else:
+                from app.dialogue._llm import OpenAILLM
+
+                self._llm = OpenAILLM(language=self._language)
         return self._llm
 
     def set_language(self, language: str) -> None:
@@ -39,3 +48,11 @@ class DialogueService:
         `context` (retrieved knowledge). Builds the OpenAI client on the
         first call."""
         return await self._get_llm().respond(user_text, context)
+
+    async def respond_stream(
+        self, user_text: str, context: str | None = None
+    ) -> AsyncGenerator[str, None]:
+        """Stream a reply to `user_text` as an async generator yielding
+        text chunks."""
+        async for chunk in self._get_llm().respond_stream(user_text, context):
+            yield chunk

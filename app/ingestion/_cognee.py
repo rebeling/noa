@@ -17,6 +17,26 @@ from urllib.parse import unquote, urlparse
 # Restrict identifiers to a safe charset — no path separators, no traversal.
 _SAFE_ID = re.compile(r"[^A-Za-z0-9_-]")
 
+# SHARED MEMORY MODE: every user shares ONE memory.
+# The caller's user_id and dataset_name are ignored — collapsed to these
+# single identifiers — so any fact stored by anyone is recalled by everyone.
+# This is the ONE chokepoint: every add / search / visualize path resolves
+# its tenant through _tenant() and _dataset() below.
+_SHARED_USER: str | None = "shared_user"
+_SHARED_DATASET: str | None = "shared_dataset"
+
+
+def _tenant(user_id: str) -> str:
+    """Collapse any caller user_id to the shared tenant when shared-memory
+    mode is on; otherwise pass it through unchanged."""
+    return _SHARED_USER if _SHARED_USER is not None else user_id
+
+
+def _dataset(dataset_name: str) -> str:
+    """Collapse any caller dataset_name to the shared dataset when shared-memory
+    mode is on; otherwise pass it through unchanged."""
+    return _SHARED_DATASET if _SHARED_DATASET is not None else dataset_name
+
 # Cap retrieved context so it can't blow the downstream LLM prompt.
 _MAX_CONTEXT_CHARS = 4000
 
@@ -402,6 +422,8 @@ async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
     prior search results — a loop that re-ingested stringified search dumps
     as facts and poisoned the graph. remember() makes that hack unnecessary.
     """
+    user_id = _tenant(user_id)
+    dataset_name = _dataset(dataset_name)
     safe_user_id = _safe(user_id)
     dataset_name = _safe(dataset_name)
     cognee = _get_cognee()
@@ -429,6 +451,17 @@ async def _search_cognee(
 ) -> tuple[str, str, int]:
     cognee = _get_cognee()
     from cognee.modules.search.types import SearchType
+    from cognee.modules.data.methods import get_datasets_by_name
+
+    # Check if dataset exists before searching to avoid 404 error
+    try:
+        datasets = await get_datasets_by_name(dataset_name, user.id)
+        if not datasets:
+            print(f"[trace] cognee search: dataset {dataset_name!r} not found for user")
+            return "", "MISS", 0
+    except Exception as e:
+        print(f"[trace] cognee search: error checking dataset: {e}")
+        return "", "ERROR", 0
 
     # Session experiment: route to GRAPH_COMPLETION (a session-eligible type)
     # so the passed session_id threads prior Q&A into the prompt. Otherwise
@@ -509,6 +542,8 @@ async def query_with_meta(
     session turn always goes through GRAPH_COMPLETION on the cognee side.
     """
     t0 = time.perf_counter()
+    user_id = _tenant(user_id)
+    dataset_name = _dataset(dataset_name)
     safe_user_id = _safe(user_id)
     dataset_name = _safe(dataset_name)
     intent = _classify_intent(query)
@@ -618,6 +653,8 @@ async def visualize(user_id: str, dataset_name: str) -> str:
     the global graph. Returns the HTML string; raises if the dataset
     doesn't exist for this user (caller maps that to a 404).
     """
+    user_id = _tenant(user_id)
+    dataset_name = _dataset(dataset_name)
     dataset_name = _safe(dataset_name)
     _get_cognee()
     await _ensure_tables()

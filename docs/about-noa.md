@@ -21,13 +21,14 @@ on-screen blob (the "aura") and tell the user what Noa is doing right now.
 | **processing** | — | Turn ended — ASR + LLM running | Gentle fast pulse, violet glow, halo pulses |
 | **speaking** | — | Reply synthesized — TTS audio streaming out | Big loose waves, orange glow, halo radiates outward |
 
+
 ## State cycle
 
 ```
    idle ─speech─▶ listening ─silence─▶ (holding) ─hold done─▶ processing ─reply─▶ speaking
            ▲          ▲                    │                     │                  │
            │          │                    │                     │                  │
-           │          └──── barge-in ──────┴─────────────────────┴──────────────────┘
+           │          └──── barge-in ──────┴─────────────────────┴──────────────────┘  << replaced with pinecat turn management
            │                 (user speaks while Noa is busy)
            └──────────────── session end / no turn ───────────────────────────────────
 ```

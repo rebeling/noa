@@ -67,6 +67,12 @@ _FAKE_SPEAKING_SECS = 3.0
 # Echo-LLM delay range: simulates LLM latency without an API call.
 _ECHO_LLM_MIN_SECS = 1.0
 _ECHO_LLM_MAX_SECS = 2.5
+# Max time the reply path waits on a Cognee search before giving up and
+# answering ungrounded. The search is on the critical path (the LLM can't
+# start until context resolves), and graph search has spiked to 4-8s in
+# logs. Bounding it caps the worst-case dead air: past the budget we drop
+# context rather than make the user wait. The filler keeps playing meanwhile.
+_CONTEXT_BUDGET_SECS = 1.5
 # Pronunciation overrides for the TTS path. Empty by default — add
 # entries here only if Kokoro mispronounces a specific name/term.
 _TTS_PRONUNCIATION: dict[str, str] = {}
@@ -92,6 +98,23 @@ _QUESTION_WORDS = frozenset(
     "who what when where why how which whose whom "
     "is are am was were can could would should "
     "do does did will may might shall".split()
+)
+
+# Recall-intent phrasings that are NOT questions (no '?', no leading question
+# word) but still want a memory lookup: imperatives ("tell me about ...",
+# "remind me ...") and memory-directed verbs ("recall", "remember", "know
+# about"). Without this, "tell me about Matthias" / "erzähl mir von ..." skip
+# Cognee entirely and Noa answers from nothing — looking like it has no memory.
+# Matched anywhere in the utterance, case-insensitively.
+_RECALL_RE = re.compile(
+    r"\b("
+    r"tell me (?:about|what)|what do you (?:know|remember)|"
+    r"do you (?:know|remember)|remind me|recall|"
+    r"know about|remember about|"
+    r"erz[äa]hl|erzaehl|was wei(?:ß|ss)t du|"
+    r"erinnerst du|kennst du|wei(?:ß|ss)t du (?:noch|über|ueber)"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -125,6 +148,8 @@ def _looks_like_question(text: str) -> bool:
     if not t:
         return False
     if t.endswith("?"):
+        return True
+    if _RECALL_RE.search(t):
         return True
     first = t.split(None, 1)[0].strip(".,!?;:")
     return first in _QUESTION_WORDS
@@ -161,6 +186,46 @@ _FACT_DENIED = {
     "en": "Sorry, only an admin can add facts. I can answer questions, though.",
     "de": "Nur ein Administrator kann Fakten hinzufügen. Fragen beantworte ich aber gern.",
 }
+
+# Fillers: short natural phrases Noa says while thinking for a long answer.
+# These provide immediate audio feedback (latency < 200ms) while the slow
+# LLM/Cognee parts run in the background.
+_FILLERS = {
+    "en": [
+        "Let me see...",
+        "One moment...",
+        "Let me think about that...",
+        "Hmm, let me check...",
+        "Good question, let me look that up...",
+        "Sure, give me a second...",
+        "Okay, checking now...",
+        "Right, let me find that...",
+        "Just a moment...",
+        "Let me pull that up...",
+    ],
+    "de": [
+        "Lass mich kurz nachsehen...",
+        "Einen Moment bitte...",
+        "Ich schaue mal eben...",
+        "Hm, lass mich kurz überlegen...",
+        "Gute Frage, ich sehe mal nach...",
+        "Klar, einen Augenblick...",
+        "Okay, ich prüfe das...",
+        "Moment, ich suche das...",
+        "Sekunde, ich schaue...",
+        "Das sehe ich mir kurz an...",
+    ],
+}
+
+
+def _pick_filler(pool: list[str], last: str | None) -> str:
+    """Pick a filler, avoiding an immediate repeat of `last`. With a pool
+    of >1 this guarantees the same line never plays twice in a row — the
+    main thing that made the fillers feel canned."""
+    if len(pool) > 1 and last is not None:
+        choices = [p for p in pool if p != last]
+        return random.choice(choices)
+    return random.choice(pool)
 
 
 # Background fact-ingest tasks, anchored at module scope so they survive the
@@ -240,6 +305,10 @@ class DialogueOrchestrator:
         # the closures read so a mid-session switch reaches fact confirm/deny.
         session_lang = language
 
+        # Last filler phrase spoken this session — so _pick_filler never
+        # repeats the same line twice in a row.
+        last_filler: str | None = None
+
         # cognee-sessions experiment: one session id per WebSocket connection,
         # scoped to the tenant so threads never cross users. None when the
         # toggle is off → retrieval keeps its default (lexical) path.
@@ -315,66 +384,150 @@ class DialogueOrchestrator:
                   f"(target={delay*1000:.0f}ms) chars={len(text)}")
             return text
 
-        async def _reply_with_tts(text: str, llm_call) -> None:
-            """Shared path: status=Processing → [retrieve] → llm_call →
-            status=Speaking → streamed TTS chunks → status=Waiting.
-            `llm_call` is an async callable (user_text, context) → reply,
-            so 'real' and 'echo' modes share this body.
-            Routing gate: only questions trigger a Cognee lookup; chitchat
-            goes straight to the LLM with no context. A cognee miss or
-            error returns "" (see _cognee.search) and degrades to plain
-            chat — the turn never crashes on retrieval.
-            TTS streams chunk-by-chunk so the client starts playback on
-            the first chunk instead of waiting for the full sentence."""
+        async def _reply_with_tts(text: str, llm_stream_call) -> None:
+            """Shared path: status=Processing → [retrieve] → llm_stream_call
+            → status=Speaking → streamed TTS chunks → status=Waiting.
+            `llm_stream_call` is an async generator callable (user_text,
+            context) → chunks.
+            
+            This version implements 'streaming-to-streaming' with a producer-consumer
+            queue to overlap LLM generation and TTS synthesis, minimizing TTFA."""
+            t_turn_start = time.perf_counter()
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Processing..."}))
-            context: str | None = None
+            
             is_question = _looks_like_question(text)
-            if is_question:
-                result = await ingestion.query_with_meta(
-                    text, user_id, dataset_name,
-                    session_id=cognee_session_id,
-                )
-                context = result.context or None
-                print(f"[route] question=True "
-                      f"ctx_chars={len(context or '')} "
-                      f"{result.elapsed_ms}ms "
-                      f"source={result.source} intent={result.intent} "
-                      f"search_type={result.search_type or '-'} "
-                      f"hits={result.hit_count} "
-                      f"fallback={result.fallback_used}")
-            else:
-                print("[route] question=False ctx_chars=0")
-            t_llm = time.perf_counter()
-            reply = await llm_call(text, context)
-            # Make the reply speakable: strip markdown/links, cap length at a
-            # sentence boundary. Pure string work — no added latency. Cleaned
-            # text drives BOTH the on-screen response and TTS so they match.
-            reply = postprocess_for_speech(reply)
-            print(f"[llm ] total {(time.perf_counter()-t_llm)*1000:.0f}ms "
-                  f"reply_chars={len(reply)}")
-            # Hold Speaking status + response text until the first audio
-            # chunk is ready. Otherwise UI flips to 'speaking' while TTS
-            # still synthesizes silently for 2-5s. All three land
-            # together: status, text, first audio.
-            t_tts = time.perf_counter()
-            chunks = 0
-            total_bytes = 0
-            tts_text = _apply_tts_pronunciation(reply)
-            async for chunk in synthesis.synthesize_stream(tts_text):
-                if chunks == 0:
-                    print(f"[tts ] first_chunk_to_client "
-                          f"{(time.perf_counter()-t_tts)*1000:.0f}ms "
-                          f"bytes={len(chunk)}")
+            context = None
+
+            async def _get_context():
+                nonlocal context
+                if is_question:
+                    result = await ingestion.query_with_meta(
+                        text, user_id, dataset_name
+                    )
+                    context = result.context or None
+                    print(f"[trace] cognee search: {result.elapsed_ms}ms "
+                          f"source={result.source} hit_count={result.hit_count}")
+                else:
+                    print("[trace] cognee skip: 0ms (not a question)")
+            
+            # Start Cognee search in parallel with filler preparation
+            ctx_task = asyncio.create_task(_get_context())
+
+            # For questions, say a filler immediately to mask Cognee + LLM
+            # initial latency. Only if not in fake mode.
+            filler_task = None
+            if is_question and _REPLY_MODE != "fake":
+                nonlocal last_filler
+                pool = _FILLERS.get(session_lang, _FILLERS["en"])
+                filler_phrase = _pick_filler(pool, last_filler)
+                last_filler = filler_phrase
+                async def _say_filler():
+                    print(f"[trace] speaking filler: {filler_phrase!r}")
                     await _safe_send_text(websocket, json.dumps(
                         {"type": "status", "text": "Speaking..."}))
                     await _safe_send_text(websocket, json.dumps(
-                        {"type": "response", "text": reply}))
-                chunks += 1
-                total_bytes += len(chunk)
-                await _safe_send_bytes(websocket, chunk)
-            print(f"[tts ] stream_done {(time.perf_counter()-t_tts)*1000:.0f}ms "
-                  f"chunks={chunks} bytes={total_bytes}")
+                        {"type": "response", "text": filler_phrase}))
+                    async for chunk in synthesis.synthesize_stream(filler_phrase):
+                        await _safe_send_bytes(websocket, chunk)
+                filler_task = asyncio.create_task(_say_filler())
+
+            # Wait for Cognee but cap the time so we don't hang forever
+            done, _ = await asyncio.wait({ctx_task}, timeout=_CONTEXT_BUDGET_SECS)
+            if ctx_task not in done:
+                ctx_task.cancel()
+                ctx_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+                print(f"[trace] cognee search: TIMEOUT >"
+                      f"{_CONTEXT_BUDGET_SECS*1000:.0f}ms -> answering ungrounded")
+
+            t_llm_start = time.perf_counter()
+            
+            # Sentence queue for the producer-consumer pipeline
+            sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
+            
+            # Sentence boundaries for natural chunking
+            _SENTENCE_END = re.compile(r"([.!?])\s+")
+
+            async def sentence_producer():
+                """Consumes the LLM token stream, chunks into sentences, and pushes to queue."""
+                buffer = ""
+                async for chunk in llm_stream_call(text, context):
+                    buffer += chunk
+                    # Look for sentence boundaries
+                    while True:
+                        match = _SENTENCE_END.search(buffer)
+                        if not match:
+                            break
+                        sentence = buffer[:match.end()].strip()
+                        buffer = buffer[match.end():]
+                        if sentence:
+                            await sentence_queue.put(sentence)
+                
+                # Final flush
+                remaining = buffer.strip()
+                if remaining:
+                    await sentence_queue.put(remaining)
+                await sentence_queue.put(None)  # Sentinel
+
+            async def sentence_consumer():
+                """Pulls sentences from the queue and synthesizes them immediately."""
+                nonlocal chunks, total_bytes
+                first_sentence = True
+                while True:
+                    sentence = await sentence_queue.get()
+                    if sentence is None:
+                        sentence_queue.task_done()
+                        break
+                    
+                    clean = postprocess_for_speech(sentence)
+                    if not clean:
+                        sentence_queue.task_done()
+                        continue
+
+                    # If the filler is still going, we let it finish. 
+                    # BUT: if the first sentence is ready, we want to ensure the 
+                    # status is Speaking... (filler might have already set it).
+                    if first_sentence:
+                        t_first_sentence_ready = time.perf_counter()
+                        print(f"[trace] llm first sentence ready: {(t_first_sentence_ready - t_llm_start)*1000:.0f}ms")
+                        await _safe_send_text(websocket, json.dumps(
+                            {"type": "status", "text": "Speaking..."}))
+                    
+                    # Append this segment's text to the chat bubble.
+                    await _safe_send_text(websocket, json.dumps(
+                        {"type": "response_chunk", "text": sentence + " "}))
+                    
+                    tts_text = _apply_tts_pronunciation(clean)
+                    async for audio_chunk in synthesis.synthesize_stream(tts_text):
+                        if first_sentence and chunks == 0:
+                            t_first_audio = time.perf_counter()
+                            print(f"[trace] tts first_chunk: {(t_first_audio - t_first_sentence_ready)*1000:.0f}ms")
+                            print(f"[trace] TOTAL TO REAL AUDIO: {(t_first_audio - t_turn_start)*1000:.0f}ms")
+                        chunks += 1
+                        total_bytes += len(audio_chunk)
+                        await _safe_send_bytes(websocket, audio_chunk)
+                    
+                    first_sentence = False
+                    sentence_queue.task_done()
+
+            chunks = 0
+            total_bytes = 0
+            
+            # Start the pipeline
+            producer_task = asyncio.create_task(sentence_producer())
+            consumer_task = asyncio.create_task(sentence_consumer())
+            
+            # Wait for the whole pipeline to finish
+            await asyncio.gather(producer_task, consumer_task)
+            
+            # Ensure filler is finished if it was long (unlikely with RAG)
+            if filler_task:
+                await filler_task
+            
+            t_turn_end = time.perf_counter()
+            print(f"[trace] tts total: {(t_turn_end - t_turn_start)*1000:.0f}ms chunks={chunks}")
+            print(f"[trace] FULL TURN: {(t_turn_end - t_turn_start)*1000:.0f}ms")
+            
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
@@ -432,9 +585,14 @@ class DialogueOrchestrator:
                     await _handle_fact(fact)
                     return
                 if _REPLY_MODE == "real":
-                    await _reply_with_tts(text, dialogue.respond)
+                    await _reply_with_tts(text, dialogue.respond_stream)
                 elif _REPLY_MODE == "echo":
-                    await _reply_with_tts(text, _echo_llm)
+                    # Mock echo doesn't support streaming yet, but we'll use 
+                    # the old _reply_with_tts logic for it or just wrap it.
+                    # For now, let's just wrap it in a dummy generator.
+                    async def _echo_stream(t, c):
+                        yield await _echo_llm(t, c)
+                    await _reply_with_tts(text, _echo_stream)
                 else:
                     await _fake_reply(text)
             except asyncio.CancelledError:

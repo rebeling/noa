@@ -1,4 +1,5 @@
 import asyncio
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,11 +18,17 @@ shared_tts = SynthesisService()
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    # Warm Kokoro in a thread so boot stays non-blocking. warmup() runs a
-    # tiny synth so the ONNX graph is hot; the first user session then hits
-    # a warm model. No greeting is precached — the orchestrator picks a
-    # random greeting per session and synthesizes it on demand.
-    await asyncio.to_thread(shared_tts.warmup)
+    # Warm Kokoro so ONNX graphs / kernels are hot before the first user-visible
+    # call. This reduces the first-reply latency from ~5s to <1s.
+    t0 = time.perf_counter()
+    try:
+        # warmup() synth's "hi." — we await it directly in the lifespan to
+        # ensure the model is truly hot before the server accepts connections.
+        await asyncio.to_thread(shared_tts.warmup)
+        print(f"[boot] TTS preloaded in {(time.perf_counter()-t0)*1000:.0f}ms")
+    except Exception as e:
+        print(f"[boot] TTS preload failed: {e}")
+    
     app_.state.shared_tts = shared_tts
     yield
 
