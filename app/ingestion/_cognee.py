@@ -454,6 +454,7 @@ async def _search_cognee(
     from cognee.modules.data.methods import get_datasets_by_name
 
     # Check if dataset exists before searching to avoid 404 error
+    _t_ds = time.perf_counter()
     try:
         datasets = await get_datasets_by_name(dataset_name, user.id)
         if not datasets:
@@ -462,6 +463,7 @@ async def _search_cognee(
     except Exception as e:
         print(f"[trace] cognee search: error checking dataset: {e}")
         return "", "ERROR", 0
+    _dt_ds = (time.perf_counter() - _t_ds) * 1000
 
     # Session experiment: route to GRAPH_COMPLETION (a session-eligible type)
     # so the passed session_id threads prior Q&A into the prompt. Otherwise
@@ -485,7 +487,9 @@ async def _search_cognee(
     # session_id is only meaningful on cognee.search/recall when caching is
     # on; passed through unconditionally — cognee ignores it for non-session
     # search types and degrades gracefully if no cache backend exists.
-    if use_recall and hasattr(cognee, "recall"):
+    _api = "recall" if (use_recall and hasattr(cognee, "recall")) else "search"
+    _t_call = time.perf_counter()
+    if _api == "recall":
         results = await cognee.recall(
             query_text=query,
             query_type=search_type,
@@ -506,8 +510,14 @@ async def _search_cognee(
             top_k=top_k,
             session_id=session_id,
         )
+    _dt_call = (time.perf_counter() - _t_call) * 1000
     parts = [_result_text(r) for r in (results or [])]
     parts = [part for part in parts if part]
+    # Phase breakdown: the cognee call dominates (vector + optional LLM);
+    # dataset_check and result parsing are negligible by comparison.
+    print(f"[trace] cognee phases: dataset_check={_dt_ds:.0f}ms "
+          f"{_api}({search_type.value})={_dt_call:.0f}ms "
+          f"top_k={top_k} results={len(parts)}")
     return "\n\n".join(parts).strip()[:_MAX_CONTEXT_CHARS], search_type.value, len(parts)
 
 

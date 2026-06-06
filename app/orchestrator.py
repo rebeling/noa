@@ -69,10 +69,12 @@ _ECHO_LLM_MIN_SECS = 1.0
 _ECHO_LLM_MAX_SECS = 2.5
 # Max time the reply path waits on a Cognee search before giving up and
 # answering ungrounded. The search is on the critical path (the LLM can't
-# start until context resolves), and graph search has spiked to 4-8s in
-# logs. Bounding it caps the worst-case dead air: past the budget we drop
-# context rather than make the user wait. The filler keeps playing meanwhile.
-_CONTEXT_BUDGET_SECS = 1.5
+# start until context resolves). The filler ("give me a second…") plays
+# while we wait, so the budget is the filler's cover, not dead air — set it
+# high enough for the slow GRAPH_COMPLETION/session path (4-8s in logs),
+# which is the whole point of a knowledge assistant. Past the budget we drop
+# context rather than hang forever. Override with NOA_CONTEXT_BUDGET_SECS.
+_CONTEXT_BUDGET_SECS = float(os.environ.get("NOA_CONTEXT_BUDGET_SECS", "12.0"))
 # Pronunciation overrides for the TTS path. Empty by default — add
 # entries here only if Kokoro mispronounces a specific name/term.
 _TTS_PRONUNCIATION: dict[str, str] = {}
@@ -396,14 +398,22 @@ class DialogueOrchestrator:
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Processing..."}))
             
+            # In session mode every turn goes to cognee so the conversational
+            # session threads context across short follow-ups ("Yes.",
+            # "Mr. Rebel") that the question heuristic would otherwise skip —
+            # exactly the turns where a knowledge lookup is wanted. Without
+            # session mode, keep the cheap question gate so we don't pay the
+            # lexical search on every utterance.
             is_question = _looks_like_question(text)
+            should_search = is_question or cognee_session_id is not None
             context = None
 
             async def _get_context():
                 nonlocal context
-                if is_question:
+                if should_search:
                     result = await ingestion.query_with_meta(
-                        text, user_id, dataset_name
+                        text, user_id, dataset_name,
+                        session_id=cognee_session_id,
                     )
                     context = result.context or None
                     print(f"[trace] cognee search: {result.elapsed_ms}ms "
@@ -414,10 +424,12 @@ class DialogueOrchestrator:
             # Start Cognee search in parallel with filler preparation
             ctx_task = asyncio.create_task(_get_context())
 
-            # For questions, say a filler immediately to mask Cognee + LLM
-            # initial latency. Only if not in fake mode.
+            # Say a filler immediately to mask Cognee + LLM latency whenever
+            # we're about to hit the graph (any searched turn, not just ones
+            # that parse as questions) — otherwise a slow session lookup on a
+            # short follow-up is dead air. Only if not in fake mode.
             filler_task = None
-            if is_question and _REPLY_MODE != "fake":
+            if should_search and _REPLY_MODE != "fake":
                 nonlocal last_filler
                 pool = _FILLERS.get(session_lang, _FILLERS["en"])
                 filler_phrase = _pick_filler(pool, last_filler)
@@ -771,6 +783,14 @@ class DialogueOrchestrator:
                                 pending_reply.cancel()
                                 pending_reply = None
                                 print("barge_in: cancelled pending reply")
+                        elif ctype == "text_input":
+                            # Typed message: skip ASR/VAD entirely and drive
+                            # the same reply path as a finished spoken turn.
+                            # Lets us test retrieval + LLM without the mic.
+                            typed = str(ctrl.get("text", "")).strip()
+                            if typed:
+                                print(f"[text_input] {typed!r}")
+                                await on_turn_ended(TurnEnded(transcript=typed))
                     continue
                 chunk = message.get("bytes")
                 if not chunk:
