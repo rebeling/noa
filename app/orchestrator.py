@@ -36,6 +36,7 @@ from app.dialogue import DialogueService
 from app.ingestion import IngestionService
 from app.speech_input import SpeechInputService
 from app.synthesis import SynthesisService, postprocess_for_speech
+from app import _turn_text as txt
 
 # How often the background partial-transcribe loop runs. 0.25s keeps
 # partials snappy; Parakeet decodes a window in ~150-500ms on the Apple
@@ -75,177 +76,11 @@ _ECHO_LLM_MAX_SECS = 2.5
 # which is the whole point of a knowledge assistant. Past the budget we drop
 # context rather than hang forever. Override with NOA_CONTEXT_BUDGET_SECS.
 _CONTEXT_BUDGET_SECS = float(os.environ.get("NOA_CONTEXT_BUDGET_SECS", "12.0"))
-# Pronunciation overrides for the TTS path. Empty by default — add
-# entries here only if Kokoro mispronounces a specific name/term.
-_TTS_PRONUNCIATION: dict[str, str] = {}
-
-
-def _apply_tts_pronunciation(text: str) -> str:
-    if not _TTS_PRONUNCIATION:
-        return text
-    import re
-    for src, dst in _TTS_PRONUNCIATION.items():
-        text = re.sub(rf"\b{re.escape(src)}\b", dst, text)
-    return text
 # Reply mode:
 #   'fake' — timed stub, no LLM, no TTS (offline plumbing test)
 #   'echo' — mock LLM (1.0–2.5s delay, echoes input), real TTS
 #   'real' — real LLM + real TTS
 _REPLY_MODE = os.environ.get("NOA_REPLY_MODE", "fake").lower()
-
-# First tokens that mark an utterance as a question worth a knowledge-graph
-# lookup. Crude on purpose — swap this whole function for a classifier model
-# if precision matters.
-_QUESTION_WORDS = frozenset(
-    "who what when where why how which whose whom "
-    "is are am was were can could would should "
-    "do does did will may might shall".split()
-)
-
-# Recall-intent phrasings that are NOT questions (no '?', no leading question
-# word) but still want a memory lookup: imperatives ("tell me about ...",
-# "remind me ...") and memory-directed verbs ("recall", "remember", "know
-# about"). Without this, "tell me about Matthias" / "erzähl mir von ..." skip
-# Cognee entirely and Noa answers from nothing — looking like it has no memory.
-# Matched anywhere in the utterance, case-insensitively.
-_RECALL_RE = re.compile(
-    r"\b("
-    r"tell me (?:about|what)|what do you (?:know|remember)|"
-    r"do you (?:know|remember)|remind me|recall|"
-    r"know about|remember about|"
-    r"erz[äa]hl|erzaehl|was wei(?:ß|ss)t du|"
-    r"erinnerst du|kennst du|wei(?:ß|ss)t du (?:noch|über|ueber)"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-# Greeting pool per language — one picked at random per session so the
-# assistant doesn't open with the same line every time.
-_GREETINGS = {
-    "en": [
-        "Hi, how can I help?",
-        "Hey there — what's up?",
-        "Hello! What can I do for you?",
-        "Hi! What's on your mind?",
-        "Hey! Ready when you are.",
-        "Good to see you — how can I help?",
-    ],
-    "de": [
-        "Hi, wie kann ich helfen?",
-        "Hallo! Was gibt's?",
-        "Hey, was kann ich für dich tun?",
-        "Hallo! Was beschäftigt dich?",
-        "Hi! Ich bin bereit, wenn du es bist.",
-        "Schön, dass du da bist — wie kann ich helfen?",
-    ],
-}
-
-
-def _looks_like_question(text: str) -> bool:
-    """Heuristic question detector. True if the utterance ends with '?'
-    or opens with a question word. No model, no API call — the cheap
-    routing gate that decides whether to hit Cognee."""
-    t = text.strip().lower()
-    if not t:
-        return False
-    if t.endswith("?"):
-        return True
-    if _RECALL_RE.search(t):
-        return True
-    first = t.split(None, 1)[0].strip(".,!?;:")
-    return first in _QUESTION_WORDS
-
-
-# Wake phrase that marks a spoken turn as "store this as a fact". Everything
-# after the phrase is ingested. Matched case-insensitively at the start of the
-# turn. Built as a regex (not a startswith list) because ASR transcribes the
-# same spoken phrase with varying punctuation/filler — "Merk dir, dass …",
-# "Merke dir: …", "Merk dir mal …" must all match. Groups:
-#   - merk(e) dir  with optional " mal", then optional separator (",", ":",
-#     " dass", " das") before the body.
-#   - remember / note that  (English).
-# ASR (Whisper) mangles the spoken German wake-phrase badly: "merk dir dass"
-# comes back as "Merkt ihr das", "Merk, dir, dass", "Merke dir, dass", etc.
-# So match loosely: merk/merkt/merke  +  dir/ihr  +  optional mal  +  optional
-# dass/das, with stray commas/colons anywhere. English: remember (that) / note
-# that. Trailing separators after the phrase are stripped before the body.
-_FACT_WAKE_RE = re.compile(
-    r"^\s*(?:"
-    r"merk[te]?\s*,?\s*(?:dir|ihr)(?:\s+mal)?\s*,?\s*(?:dass|das)?"  # German + ASR variants
-    r"|remember(?:\s+that)?"                                          # English
-    r"|note\s+that"
-    r")\b[\s,:]*",
-    re.IGNORECASE,
-)
-# Spoken confirmation after a successful fact ingest, per language.
-_FACT_CONFIRM = {
-    "en": "Got it. I'll remember that.",
-    "de": "Verstanden. Ich merke es mir.",
-}
-# Spoken refusal when a non-admin tries to add a fact.
-_FACT_DENIED = {
-    "en": "Sorry, only an admin can add facts. I can answer questions, though.",
-    "de": "Nur ein Administrator kann Fakten hinzufügen. Fragen beantworte ich aber gern.",
-}
-
-# Fillers: short natural phrases Noa says while thinking for a long answer.
-# These provide immediate audio feedback (latency < 200ms) while the slow
-# LLM/Cognee parts run in the background.
-_FILLERS = {
-    "en": [
-        "Let me see...",
-        "One moment...",
-        "Let me think about that...",
-        "Hmm, let me check...",
-        "Good question, let me look that up...",
-        "Sure, give me a second...",
-        "Okay, checking now...",
-        "Right, let me find that...",
-        "Just a moment...",
-        "Let me pull that up...",
-    ],
-    "de": [
-        "Lass mich kurz nachsehen...",
-        "Einen Moment bitte...",
-        "Ich schaue mal eben...",
-        "Hm, lass mich kurz überlegen...",
-        "Gute Frage, ich sehe mal nach...",
-        "Klar, einen Augenblick...",
-        "Okay, ich prüfe das...",
-        "Moment, ich suche das...",
-        "Sekunde, ich schaue...",
-        "Das sehe ich mir kurz an...",
-    ],
-}
-
-
-def _pick_filler(pool: list[str], last: str | None) -> str:
-    """Pick a filler, avoiding an immediate repeat of `last`. With a pool
-    of >1 this guarantees the same line never plays twice in a row — the
-    main thing that made the fillers feel canned."""
-    if len(pool) > 1 and last is not None:
-        choices = [p for p in pool if p != last]
-        return random.choice(choices)
-    return random.choice(pool)
-
-
-# Background fact-ingest tasks, anchored at module scope so they survive the
-# session that spawned them — a user can hang up right after "merk dir …" and
-# the slow cognify must still finish. Strong refs here keep them from being
-# GC'd mid-flight; the done-callback discards each on completion.
-_bg_ingest_tasks: set[asyncio.Task] = set()
-
-
-def _extract_fact(text: str) -> str | None:
-    """If `text` opens with a fact wake-phrase, return the fact body
-    (everything after the phrase). Otherwise None. Tolerant of ASR
-    punctuation/word mangling — see _FACT_WAKE_RE."""
-    m = _FACT_WAKE_RE.match(text)
-    if not m:
-        return None
-    body = text[m.end():].strip().lstrip(",:; ").strip()
-    return body or None
 
 
 def _is_open(ws) -> bool:
@@ -307,7 +142,7 @@ class DialogueOrchestrator:
         # the closures read so a mid-session switch reaches fact confirm/deny.
         session_lang = language
 
-        # Last filler phrase spoken this session — so _pick_filler never
+        # Last filler phrase spoken this session — so txt.pick_filler never
         # repeats the same line twice in a row.
         last_filler: str | None = None
 
@@ -404,7 +239,7 @@ class DialogueOrchestrator:
             # exactly the turns where a knowledge lookup is wanted. Without
             # session mode, keep the cheap question gate so we don't pay the
             # lexical search on every utterance.
-            is_question = _looks_like_question(text)
+            is_question = txt.looks_like_question(text)
             should_search = is_question or cognee_session_id is not None
             context = None
 
@@ -431,8 +266,8 @@ class DialogueOrchestrator:
             filler_task = None
             if should_search and _REPLY_MODE != "fake":
                 nonlocal last_filler
-                pool = _FILLERS.get(session_lang, _FILLERS["en"])
-                filler_phrase = _pick_filler(pool, last_filler)
+                pool = txt.FILLERS.get(session_lang, txt.FILLERS["en"])
+                filler_phrase = txt.pick_filler(pool, last_filler)
                 last_filler = filler_phrase
                 async def _say_filler():
                     print(f"[trace] speaking filler: {filler_phrase!r}")
@@ -509,7 +344,7 @@ class DialogueOrchestrator:
                     await _safe_send_text(websocket, json.dumps(
                         {"type": "response_chunk", "text": sentence + " "}))
                     
-                    tts_text = _apply_tts_pronunciation(clean)
+                    tts_text = txt.apply_tts_pronunciation(clean)
                     async for audio_chunk in synthesis.synthesize_stream(tts_text):
                         if first_sentence and chunks == 0:
                             t_first_audio = time.perf_counter()
@@ -555,7 +390,7 @@ class DialogueOrchestrator:
                 return
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Speaking..."}))
-            tts_text = _apply_tts_pronunciation(message)
+            tts_text = txt.apply_tts_pronunciation(message)
             async for chunk in synthesis.synthesize_stream(tts_text):
                 await _safe_send_bytes(websocket, chunk)
             await _safe_send_text(websocket, json.dumps(
@@ -566,7 +401,7 @@ class DialogueOrchestrator:
             only). Confirms or refuses by voice."""
             if role != "admin":
                 print(f"[fact ] denied role={role}")
-                await _speak(_FACT_DENIED.get(session_lang, _FACT_DENIED["en"]))
+                await _speak(txt.FACT_DENIED.get(session_lang, txt.FACT_DENIED["en"]))
                 return
             # cognify takes seconds; don't block the turn on it. Confirm by
             # voice now and ingest in the background. ingest_fact merges the
@@ -583,7 +418,7 @@ class DialogueOrchestrator:
             task = asyncio.create_task(_bg_ingest())
             _bg_ingest_tasks.add(task)
             task.add_done_callback(_bg_ingest_tasks.discard)
-            await _speak(_FACT_CONFIRM.get(session_lang, _FACT_CONFIRM["en"]))
+            await _speak(txt.FACT_CONFIRM.get(session_lang, txt.FACT_CONFIRM["en"]))
 
         async def _delayed_reply(text: str) -> None:
             """Mode-switching wrapper. NOA_REPLY_MODE picks fake/echo/real.
@@ -591,7 +426,7 @@ class DialogueOrchestrator:
             instead of the LLM. Cancellation is handled here so all modes
             share the same barge-in cleanup (stop_audio + status=Listening)."""
             try:
-                fact = _extract_fact(text)
+                fact = txt.extract_fact(text)
                 if fact is not None:
                     print(f"[route] fact=True role={role} chars={len(fact)}")
                     await _handle_fact(fact)
@@ -713,7 +548,7 @@ class DialogueOrchestrator:
         async def _greet() -> None:
             # Random greeting per session, in the session language —
             # synthesized on demand (no fixed cached phrase).
-            pool = _GREETINGS.get(session_lang, _GREETINGS["en"])
+            pool = txt.GREETINGS.get(session_lang, txt.GREETINGS["en"])
             phrase = random.choice(pool)
             print(f"[greet] mode={_REPLY_MODE} lang={session_lang} "
                   f"phrase={phrase!r}")
