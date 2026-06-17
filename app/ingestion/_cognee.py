@@ -1,21 +1,31 @@
 """Cognee graph/vector store access — internal to ingestion.
 
 Per-tenant isolation: every add/cognify/search carries user_id +
-dataset_name. The _safe() sanitizer keeps tenant identifiers from ever
-forming path separators or traversal sequences.
+dataset_name. The safe() sanitizer (in _setup) keeps tenant identifiers
+from ever forming path separators or traversal sequences.
+
+Retrieval orchestration lives here; setup/lifecycle is in _setup, the
+local lexical fast path in _local_index.
 """
 
-import os
-import re
-import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import unquote, urlparse
 
-# Restrict identifiers to a safe charset — no path separators, no traversal.
-_SAFE_ID = re.compile(r"[^A-Za-z0-9_-]")
+from app.ingestion import _local_index as local
+from app.ingestion import _setup as setup
+from app.ingestion._db import cognee_db_path
+from app.ingestion._local_index import (
+    MAX_CONTEXT_CHARS,
+    classify_intent,
+    normalize_query,
+)
+from app.ingestion._setup import (
+    ensure_tables,
+    get_cognee,
+    resolve_user,
+    safe,
+)
 
 # SHARED MEMORY MODE: every user shares ONE memory.
 # The caller's user_id and dataset_name are ignored — collapsed to these
@@ -37,11 +47,10 @@ def _dataset(dataset_name: str) -> str:
     mode is on; otherwise pass it through unchanged."""
     return _SHARED_DATASET if _SHARED_DATASET is not None else dataset_name
 
-# Cap retrieved context so it can't blow the downstream LLM prompt.
-_MAX_CONTEXT_CHARS = 4000
 
-# Resolved cognee Users, keyed by app user_id — avoids a lookup per turn.
-_user_cache: dict[str, object] = {}
+# Cached retrieval results, keyed by (safe_user_id, dataset_name, normalized
+# query). Bypassed for session turns (see query_with_meta).
+_query_cache: dict[tuple[str, str, str], "KnowledgeQueryResult"] = {}
 
 
 @dataclass(frozen=True)
@@ -58,142 +67,8 @@ class KnowledgeQueryResult:
     fallback_used: bool = False
 
 
-@dataclass(frozen=True)
-class _LocalDocument:
-    text: str
-    tokens: set[str]
-    data_id: str
-    path: str
-
-
-@dataclass(frozen=True)
-class _LocalHit:
-    text: str
-    score: float
-    data_id: str
-    path: str
-
-
-@dataclass
-class _LocalIndex:
-    docs: list[_LocalDocument]
-
-
-_local_index_cache: dict[tuple[str, str], _LocalIndex] = {}
-_query_cache: dict[tuple[str, str, str], KnowledgeQueryResult] = {}
-
-_WORD_RE = re.compile(r"\b[\w]+\b", re.UNICODE)
-_STOP_WORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "about",
-    "can",
-    "does",
-    "do",
-    "for",
-    "from",
-    "give",
-    "how",
-    "in",
-    "is",
-    "me",
-    "of",
-    "on",
-    "please",
-    "the",
-    "to",
-    "was",
-    "what",
-    "where",
-    "who",
-    "why",
-    "wie",
-    "wo",
-    "wer",
-    "was",
-    "warum",
-    "ist",
-    "sind",
-    "der",
-    "die",
-    "das",
-    "den",
-    "dem",
-    "ein",
-    "eine",
-    "einer",
-    "und",
-    "oder",
-    "von",
-    "zu",
-    "im",
-    "am",
-    "mit",
-    "mir",
-    "bitte",
-}
-_LOCAL_MIN_SCORE = 0.45
-_LOCAL_TOP_K = 3
-
-
-def _safe(component: str) -> str:
-    """Sanitize a tenant identifier for safe use in dataset names.
-
-    Rejects path-traversal inputs outright (rather than silently
-    mangling them) so a bad identifier surfaces as an error at the
-    call site instead of becoming a wrong-but-valid dataset name.
-    """
-    raw = (component or "").strip()
-    if not raw or raw in {".", ".."}:
-        raise ValueError(f"Invalid identifier: {component!r}")
-    cleaned = _SAFE_ID.sub("_", raw)
-    # All characters were separators/illegal — nothing usable remains.
-    if not cleaned.strip("_"):
-        raise ValueError(f"Invalid identifier: {component!r}")
-    return cleaned
-
-
-def _tokenize(text: str) -> list[str]:
-    return [
-        token
-        for token in (match.group(0).lower() for match in _WORD_RE.finditer(text))
-        if len(token) >= 2 and token not in _STOP_WORDS
-    ]
-
-
-def _normalize_query(query: str) -> str:
-    return " ".join(_tokenize(query))
-
-
-def _classify_intent(query: str) -> str:
-    q = query.strip().lower()
-    if re.search(r'"[^"]+"|\b(exact|verbatim|literal|word.for.word)\b', q):
-        return "exact_lookup"
-    if re.search(r"\b(summarize|summary|overview|tl;?dr|gist)\b", q):
-        return "summary"
-    if re.search(r"\b(before|after|during|since|until|timeline)\b|\b\d{4}s?\b", q):
-        return "temporal"
-    if re.search(
-        r"\b(related|connected|linked|relationship|connection|relates|verbunden)\b",
-        q,
-    ):
-        return "relationship"
-    if re.search(
-        r"\b(who|what|where|which|does|is|are|wer|was|wo|welche|ist|sind)\b",
-        q,
-    ):
-        return "fact_lookup"
-    return "open_question"
-
-
-def _cognee_db_path() -> Path:
-    return Path(os.getcwd()) / ".cognee_data" / "system" / "databases" / "cognee_db"
-
-
 def _existing_user_db_id(safe_user_id: str) -> str | None:
-    db_path = _cognee_db_path()
+    db_path = cognee_db_path()
     if not db_path.exists():
         return None
     try:
@@ -207,209 +82,11 @@ def _existing_user_db_id(safe_user_id: str) -> str | None:
     return str(row[0]) if row else None
 
 
-def _path_from_raw_location(raw_location: str) -> Path | None:
-    parsed = urlparse(raw_location or "")
-    if parsed.scheme == "file":
-        return Path(unquote(parsed.path))
-    if not parsed.scheme and raw_location:
-        return Path(raw_location)
-    return None
-
-
 def _invalidate_local_cache(safe_user_id: str, dataset_name: str) -> None:
     prefix = (safe_user_id, dataset_name)
-    _local_index_cache.pop(prefix, None)
+    local.invalidate(safe_user_id, dataset_name)
     for key in [key for key in _query_cache if key[:2] == prefix]:
         _query_cache.pop(key, None)
-
-
-def _format_context(hits: list[_LocalHit]) -> str:
-    parts = []
-    for hit in hits:
-        text = hit.text.strip()
-        if text:
-            parts.append(text)
-    return "\n\n".join(parts).strip()[:_MAX_CONTEXT_CHARS]
-
-
-_cognee_configured = False
-
-
-def _get_cognee():
-    """Import cognee and configure its storage roots + LLM key once.
-
-    Storage is project-local per CLAUDE.md (.cognee_system/databases/...)
-    rather than the default buried inside site-packages, which isn't
-    created and fails with 'unable to open database file'.
-    """
-    global _cognee_configured
-    import cognee
-
-    if not _cognee_configured:
-        from app.core.config import settings
-
-        # cognee reads access control from os.environ, not our Settings object
-        # (see cognee.context_global_variables.backend_access_control_enabled).
-        # Export the setting so the per-tenant isolation CLAUDE.md mandates is
-        # enforced from our config — never left to whether .env happened to set
-        # the bare env var.
-        os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] = (
-            "true" if settings.ENABLE_BACKEND_ACCESS_CONTROL else "false"
-        )
-
-        base = os.path.join(os.getcwd(), ".cognee_data")
-        data_dir = os.path.join(base, "data")
-        system_dir = os.path.join(base, "system")
-        # cognee opens its sqlite metadata DB at <system>/databases without
-        # creating the tree first, so pre-create both roots and the db dir.
-        os.makedirs(data_dir, exist_ok=True)
-        os.makedirs(os.path.join(system_dir, "databases"), exist_ok=True)
-        cognee.config.data_root_directory(data_dir)
-        cognee.config.system_root_directory(system_dir)
-        if settings.OPENAI_API_KEY:
-            cognee.config.set_llm_api_key(settings.OPENAI_API_KEY)
-        _cognee_configured = True
-    return cognee
-
-
-_tables_ready = False
-
-
-async def _ensure_tables() -> None:
-    """Create cognee's relational schema once. A freshly configured DB has
-    no tables, so user lookups (the first cognee call we make) hit
-    'no such table: principals'. create_db_and_tables is idempotent."""
-    global _tables_ready
-    if _tables_ready:
-        return
-    _get_cognee()  # configure storage roots + LLM key first
-    from cognee.infrastructure.databases.relational import create_db_and_tables
-
-    await create_db_and_tables()
-    _tables_ready = True
-
-
-async def _resolve_user(user_id: str):
-    """Map an app user_id to a cognee User (get-or-create by synthetic
-    email). Cognee 1.1 scopes every add/cognify/search to a User object,
-    not a bare id — this is what makes per-tenant isolation real.
-
-    Result cached per process so we don't re-query cognee each turn.
-    """
-    safe_id = _safe(user_id)
-    cached = _user_cache.get(safe_id)
-    if cached is not None:
-        return cached
-    await _ensure_tables()  # configure + create schema before first lookup
-    from cognee.modules.users.methods import create_user, get_user_by_email
-
-    # cognee validates the email; reserved TLDs (.local/.test/.invalid) are
-    # rejected, so use a normal-looking domain. These accounts are synthetic
-    # and never receive mail.
-    email = f"{safe_id}@noa-users.com"
-    try:
-        user = await get_user_by_email(email)
-    except Exception:  # noqa: BLE001
-        user = None
-    if user is None:
-        # Random password — these synthetic accounts are never logged into.
-        user = await create_user(
-            email, secrets.token_urlsafe(24), is_verified=True
-        )
-    _user_cache[safe_id] = user
-    return user
-
-
-def _load_local_index(
-    safe_user_id: str, dataset_name: str, owner_id: str
-) -> _LocalIndex:
-    cache_key = (safe_user_id, dataset_name)
-    cached = _local_index_cache.get(cache_key)
-    if cached is not None:
-        return cached
-
-    db_path = _cognee_db_path()
-    if not db_path.exists():
-        index = _LocalIndex(docs=[])
-        _local_index_cache[cache_key] = index
-        return index
-
-    docs: list[_LocalDocument] = []
-    query = """
-        SELECT data.id, data.raw_data_location
-        FROM datasets
-        JOIN dataset_data ON dataset_data.dataset_id = datasets.id
-        JOIN data ON data.id = dataset_data.data_id
-        WHERE datasets.name = ? AND datasets.owner_id = ?
-        ORDER BY data.created_at ASC
-    """
-    try:
-        with sqlite3.connect(db_path) as con:
-            rows = con.execute(query, (dataset_name, owner_id)).fetchall()
-    except sqlite3.Error as e:
-        print(f"Cognee local index DB error: {e}")
-        rows = []
-
-    for data_id, raw_location in rows:
-        path = _path_from_raw_location(raw_location)
-        if path is None or not path.exists() or not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        tokens = set(_tokenize(text))
-        if text and tokens:
-            docs.append(
-                _LocalDocument(
-                    text=text,
-                    tokens=tokens,
-                    data_id=str(data_id),
-                    path=str(path),
-                )
-            )
-
-    index = _LocalIndex(docs=docs)
-    _local_index_cache[cache_key] = index
-    return index
-
-
-def _search_local_index(index: _LocalIndex, query: str) -> list[_LocalHit]:
-    query_tokens = set(_tokenize(query))
-    if not query_tokens:
-        return []
-
-    hits: list[_LocalHit] = []
-    for doc in index.docs:
-        overlap = query_tokens & doc.tokens
-        if not overlap:
-            continue
-        coverage = len(overlap) / len(query_tokens)
-        jaccard = len(overlap) / len(query_tokens | doc.tokens)
-        score = coverage + (0.2 * jaccard)
-        hits.append(
-            _LocalHit(
-                text=doc.text,
-                score=score,
-                data_id=doc.data_id,
-                path=doc.path,
-            )
-        )
-
-    hits.sort(key=lambda hit: hit.score, reverse=True)
-    return hits[:_LOCAL_TOP_K]
-
-
-def _should_try_local(intent: str) -> bool:
-    return intent in {"fact_lookup", "exact_lookup", "open_question", "summary"}
-
-
-def _local_hit_is_strong(hits: list[_LocalHit], intent: str) -> bool:
-    if not hits:
-        return False
-    if intent == "summary":
-        return True
-    return hits[0].score >= _LOCAL_MIN_SCORE
 
 
 async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
@@ -424,10 +101,10 @@ async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
     """
     user_id = _tenant(user_id)
     dataset_name = _dataset(dataset_name)
-    safe_user_id = _safe(user_id)
-    dataset_name = _safe(dataset_name)
-    cognee = _get_cognee()
-    user = await _resolve_user(user_id)
+    safe_user_id = safe(user_id)
+    dataset_name = safe(dataset_name)
+    cognee = get_cognee()
+    user = await resolve_user(user_id)
     # self_improvement=False drops remember()'s follow-up reconciliation LLM
     # pass — the main cost in the ~63s ingest. Entity dedup (uuid5 of names)
     # still happens in the base cognify; we only skip the extra improve step,
@@ -457,7 +134,7 @@ async def _search_cognee(
     use_recall: bool = True,
     session_id: str | None = None,
 ) -> tuple[str, str, int]:
-    cognee = _get_cognee()
+    cognee = get_cognee()
     from cognee.modules.search.types import SearchType
     from cognee.modules.data.methods import get_datasets_by_name
 
@@ -525,7 +202,7 @@ async def _search_cognee(
     print(f"[trace] cognee phases: dataset_check={_dt_ds:.0f}ms "
           f"{_api}({search_type.value})={_dt_call:.0f}ms "
           f"top_k={top_k} results={len(parts)}")
-    return "\n\n".join(parts).strip()[:_MAX_CONTEXT_CHARS], search_type.value, len(parts)
+    return "\n\n".join(parts).strip()[:MAX_CONTEXT_CHARS], search_type.value, len(parts)
 
 
 def _result_text(result: object) -> str:
@@ -561,10 +238,10 @@ async def query_with_meta(
     t0 = time.perf_counter()
     user_id = _tenant(user_id)
     dataset_name = _dataset(dataset_name)
-    safe_user_id = _safe(user_id)
-    dataset_name = _safe(dataset_name)
-    intent = _classify_intent(query)
-    normalized_query = _normalize_query(query)
+    safe_user_id = safe(user_id)
+    dataset_name = safe(dataset_name)
+    intent = classify_intent(query)
+    normalized_query = normalize_query(query)
     cache_key = (safe_user_id, dataset_name, normalized_query)
     if session_id is None:
         cached = _query_cache.get(cache_key)
@@ -581,14 +258,14 @@ async def query_with_meta(
             )
 
     try:
-        if session_id is None and _should_try_local(intent):
+        if session_id is None and local.should_try(intent):
             owner_id = _existing_user_db_id(safe_user_id)
             if owner_id is not None:
-                index = _load_local_index(safe_user_id, dataset_name, owner_id)
-                hits = _search_local_index(index, query)
-                if _local_hit_is_strong(hits, intent):
+                index = local.load(safe_user_id, dataset_name, owner_id)
+                hits = local.search(index, query)
+                if local.hit_is_strong(hits, intent):
                     result = KnowledgeQueryResult(
-                        context=_format_context(hits),
+                        context=local.format_context(hits),
                         source="local_lexical",
                         intent=intent,
                         elapsed_ms=int((time.perf_counter() - t0) * 1000),
@@ -623,7 +300,7 @@ async def query_with_meta(
                 fallback_used=False,
             )
 
-        user = await _resolve_user(user_id)
+        user = await resolve_user(user_id)
         context, search_type, hit_count = await _search_cognee(
             query, user, dataset_name, intent, session_id=session_id
         )
@@ -672,13 +349,13 @@ async def visualize(user_id: str, dataset_name: str) -> str:
     """
     user_id = _tenant(user_id)
     dataset_name = _dataset(dataset_name)
-    dataset_name = _safe(dataset_name)
-    _get_cognee()
-    await _ensure_tables()
+    dataset_name = safe(dataset_name)
+    get_cognee()
+    await ensure_tables()
     from cognee.api.v1.visualize import visualize_multi_user_graph
     from cognee.modules.data.methods import get_datasets_by_name
 
-    user = await _resolve_user(user_id)
+    user = await resolve_user(user_id)
     datasets = await get_datasets_by_name(dataset_name, user.id)
     if not datasets:
         raise ValueError(f"No dataset {dataset_name!r} for this user")
@@ -691,15 +368,12 @@ async def reset() -> None:
     Global, not per-tenant: this is a dev reset, not a delete-my-dataset.
     Also clears the resolved-user cache so subsequent calls re-create users.
     """
-    cognee = _get_cognee()
-    await _ensure_tables()
+    cognee = get_cognee()
+    await ensure_tables()
     await cognee.prune.prune_data()
     await cognee.prune.prune_system(graph=True, vector=True, metadata=True)
-    # prune_system drops the relational schema, so the cached "tables exist"
-    # flag is now a lie — the next user lookup would hit 'no such table:
-    # principals'. Clear it so _ensure_tables rebuilds the schema on next use.
-    global _tables_ready
-    _tables_ready = False
-    _user_cache.clear()
-    _local_index_cache.clear()
+    # prune_system drops the relational schema; reset_state clears the cached
+    # "tables exist" flag + resolved users so the next call rebuilds them.
+    setup.reset_state()
+    local.clear()
     _query_cache.clear()

@@ -9,7 +9,7 @@ from app.core.security import create_access_token
 templates = Jinja2Templates(directory="app/templates")
 router = APIRouter()
 
-# Same safe charset as ingestion._cognee._safe — the chosen user becomes a
+# Same safe charset as ingestion._setup.safe — the chosen user becomes a
 # cognee tenant id, so it must not contain path separators/traversal.
 _UNSAFE_USER = re.compile(r"[^A-Za-z0-9_-]")
 
