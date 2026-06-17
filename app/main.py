@@ -2,9 +2,12 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.api.v1 import api_router
 from app.synthesis import SynthesisService
@@ -47,6 +50,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
+)
+
+# Serve the voice page's CSS/JS, split out of the inline template.
+app.mount(
+    "/static",
+    StaticFiles(directory=Path(__file__).parent / "static"),
+    name="static",
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
