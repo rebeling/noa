@@ -151,21 +151,16 @@ async def _search_cognee(
     _dt_ds = (time.perf_counter() - _t_ds) * 1000
 
     # Latency-cheap per-intent routing, used for session and non-session turns
-    # alike. Only `relationship` pays for graph+LLM completion — the one case
-    # where multi-hop reasoning is worth it. Everything else stays on a fast
-    # lexical/vector pass and lets Noa's own LLM write the final answer.
-    if intent == "exact_lookup":
-        search_type = SearchType.CHUNKS_LEXICAL
-    elif intent == "summary":
-        search_type = SearchType.GRAPH_SUMMARY_COMPLETION
-    elif intent == "temporal":
-        search_type = SearchType.TEMPORAL
-    elif intent == "relationship":
-        search_type = SearchType.GRAPH_COMPLETION
-    elif intent == "fact_lookup":
-        search_type = SearchType.CHUNKS_LEXICAL
-    else:
-        search_type = SearchType.CHUNKS_LEXICAL
+    # alike. Only summary/temporal/relationship pay for a graph (and, for the
+    # completion types, an LLM) pass — the cases where graph structure helps.
+    # Everything else (incl. the open_question default) stays on a fast lexical
+    # pass and lets Noa's own LLM write the final answer.
+    _INTENT_SEARCH_TYPE = {
+        "summary": SearchType.GRAPH_SUMMARY_COMPLETION,
+        "temporal": SearchType.TEMPORAL,
+        "relationship": SearchType.GRAPH_COMPLETION,
+    }
+    search_type = _INTENT_SEARCH_TYPE.get(intent, SearchType.CHUNKS_LEXICAL)
 
     top_k = 3 if search_type == SearchType.CHUNKS_LEXICAL else 5
     # session_id is only meaningful on cognee.search/recall when caching is

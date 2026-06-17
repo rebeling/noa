@@ -36,7 +36,7 @@ from app.dialogue import DialogueService
 from app.ingestion import IngestionService
 from app.speech_input import SpeechInputService
 from app.synthesis import SynthesisService, postprocess_for_speech
-from app import _turn_text as txt
+from app import _turn_text as turn_text
 
 # How often the background partial-transcribe loop runs. 0.25s keeps
 # partials snappy; Parakeet decodes a window in ~150-500ms on the Apple
@@ -81,6 +81,10 @@ _CONTEXT_BUDGET_SECS = float(os.environ.get("NOA_CONTEXT_BUDGET_SECS", "12.0"))
 #   'echo' — mock LLM (1.0–2.5s delay, echoes input), real TTS
 #   'real' — real LLM + real TTS
 _REPLY_MODE = os.environ.get("NOA_REPLY_MODE", "fake").lower()
+
+# Sentence boundary for streaming TTS chunking: punctuation followed by
+# whitespace. Module scope so it compiles once, not per reply turn.
+_SENTENCE_END = re.compile(r"([.!?])\s+")
 
 
 def _is_open(ws) -> bool:
@@ -142,7 +146,7 @@ class DialogueOrchestrator:
         # the closures read so a mid-session switch reaches fact confirm/deny.
         session_lang = language
 
-        # Last filler phrase spoken this session — so txt.pick_filler never
+        # Last filler phrase spoken this session — so turn_text.pick_filler never
         # repeats the same line twice in a row.
         last_filler: str | None = None
 
@@ -226,20 +230,20 @@ class DialogueOrchestrator:
             → status=Speaking → streamed TTS chunks → status=Waiting.
             `llm_stream_call` is an async generator callable (user_text,
             context) → chunks.
-            
+
             This version implements 'streaming-to-streaming' with a producer-consumer
             queue to overlap LLM generation and TTS synthesis, minimizing TTFA."""
             t_turn_start = time.perf_counter()
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Processing..."}))
-            
+
             # In session mode every turn goes to cognee so the conversational
             # session threads context across short follow-ups ("Yes.",
             # "Mr. Rebel") that the question heuristic would otherwise skip —
             # exactly the turns where a knowledge lookup is wanted. Without
             # session mode, keep the cheap question gate so we don't pay the
             # lexical search on every utterance.
-            is_question = txt.looks_like_question(text)
+            is_question = turn_text.looks_like_question(text)
             should_search = is_question or cognee_session_id is not None
             context = None
 
@@ -255,7 +259,7 @@ class DialogueOrchestrator:
                           f"source={result.source} hit_count={result.hit_count}")
                 else:
                     print("[trace] cognee skip: 0ms (not a question)")
-            
+
             # Start Cognee search in parallel with filler preparation
             ctx_task = asyncio.create_task(_get_context())
 
@@ -266,8 +270,8 @@ class DialogueOrchestrator:
             filler_task = None
             if should_search and _REPLY_MODE != "fake":
                 nonlocal last_filler
-                pool = txt.FILLERS.get(session_lang, txt.FILLERS["en"])
-                filler_phrase = txt.pick_filler(pool, last_filler)
+                pool = turn_text.FILLERS.get(session_lang, turn_text.FILLERS["en"])
+                filler_phrase = turn_text.pick_filler(pool, last_filler)
                 last_filler = filler_phrase
                 async def _say_filler():
                     print(f"[trace] speaking filler: {filler_phrase!r}")
@@ -288,33 +292,41 @@ class DialogueOrchestrator:
                       f"{_CONTEXT_BUDGET_SECS*1000:.0f}ms -> answering ungrounded")
 
             t_llm_start = time.perf_counter()
-            
-            # Sentence queue for the producer-consumer pipeline
+
+            # Sentence queue for the producer-consumer pipeline. The producer
+            # chunks the LLM token stream into sentences; the consumer pulls
+            # each sentence and synthesizes it the moment it's ready, so TTS
+            # for sentence N overlaps LLM generation of sentence N+1. None is
+            # the end-of-stream sentinel.
             sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
-            
-            # Sentence boundaries for natural chunking
-            _SENTENCE_END = re.compile(r"([.!?])\s+")
 
             async def sentence_producer():
-                """Consumes the LLM token stream, chunks into sentences, and pushes to queue."""
+                """Consume the LLM token stream, split it on sentence
+                boundaries, and push each sentence to the queue.
+
+                The finally guarantees the None sentinel is always queued —
+                even if llm_stream_call raises mid-stream — so the consumer
+                never blocks forever on an empty queue. The exception still
+                propagates to the gather below.
+                """
                 buffer = ""
-                async for chunk in llm_stream_call(text, context):
-                    buffer += chunk
-                    # Look for sentence boundaries
-                    while True:
-                        match = _SENTENCE_END.search(buffer)
-                        if not match:
-                            break
-                        sentence = buffer[:match.end()].strip()
-                        buffer = buffer[match.end():]
-                        if sentence:
-                            await sentence_queue.put(sentence)
-                
-                # Final flush
-                remaining = buffer.strip()
-                if remaining:
-                    await sentence_queue.put(remaining)
-                await sentence_queue.put(None)  # Sentinel
+                try:
+                    async for chunk in llm_stream_call(text, context):
+                        buffer += chunk
+                        while True:
+                            match = _SENTENCE_END.search(buffer)
+                            if not match:
+                                break
+                            sentence = buffer[:match.end()].strip()
+                            buffer = buffer[match.end():]
+                            if sentence:
+                                await sentence_queue.put(sentence)
+                    # Flush the trailing partial sentence (no terminal punctuation).
+                    remaining = buffer.strip()
+                    if remaining:
+                        await sentence_queue.put(remaining)
+                finally:
+                    await sentence_queue.put(None)  # end-of-stream sentinel
 
             async def sentence_consumer():
                 """Pulls sentences from the queue and synthesizes them immediately."""
@@ -325,26 +337,26 @@ class DialogueOrchestrator:
                     if sentence is None:
                         sentence_queue.task_done()
                         break
-                    
+
                     clean = postprocess_for_speech(sentence)
                     if not clean:
                         sentence_queue.task_done()
                         continue
 
-                    # If the filler is still going, we let it finish. 
-                    # BUT: if the first sentence is ready, we want to ensure the 
+                    # If the filler is still going, we let it finish.
+                    # BUT: if the first sentence is ready, we want to ensure the
                     # status is Speaking... (filler might have already set it).
                     if first_sentence:
                         t_first_sentence_ready = time.perf_counter()
                         print(f"[trace] llm first sentence ready: {(t_first_sentence_ready - t_llm_start)*1000:.0f}ms")
                         await _safe_send_text(websocket, json.dumps(
                             {"type": "status", "text": "Speaking..."}))
-                    
+
                     # Append this segment's text to the chat bubble.
                     await _safe_send_text(websocket, json.dumps(
                         {"type": "response_chunk", "text": sentence + " "}))
-                    
-                    tts_text = txt.apply_tts_pronunciation(clean)
+
+                    tts_text = turn_text.apply_tts_pronunciation(clean)
                     async for audio_chunk in synthesis.synthesize_stream(tts_text):
                         if first_sentence and chunks == 0:
                             t_first_audio = time.perf_counter()
@@ -353,28 +365,28 @@ class DialogueOrchestrator:
                         chunks += 1
                         total_bytes += len(audio_chunk)
                         await _safe_send_bytes(websocket, audio_chunk)
-                    
+
                     first_sentence = False
                     sentence_queue.task_done()
 
             chunks = 0
             total_bytes = 0
-            
+
             # Start the pipeline
             producer_task = asyncio.create_task(sentence_producer())
             consumer_task = asyncio.create_task(sentence_consumer())
-            
+
             # Wait for the whole pipeline to finish
             await asyncio.gather(producer_task, consumer_task)
-            
+
             # Ensure filler is finished if it was long (unlikely with RAG)
             if filler_task:
                 await filler_task
-            
+
             t_turn_end = time.perf_counter()
             print(f"[trace] tts total: {(t_turn_end - t_turn_start)*1000:.0f}ms chunks={chunks}")
             print(f"[trace] FULL TURN: {(t_turn_end - t_turn_start)*1000:.0f}ms")
-            
+
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
@@ -390,7 +402,7 @@ class DialogueOrchestrator:
                 return
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Speaking..."}))
-            tts_text = txt.apply_tts_pronunciation(message)
+            tts_text = turn_text.apply_tts_pronunciation(message)
             async for chunk in synthesis.synthesize_stream(tts_text):
                 await _safe_send_bytes(websocket, chunk)
             await _safe_send_text(websocket, json.dumps(
@@ -401,7 +413,7 @@ class DialogueOrchestrator:
             only). Confirms or refuses by voice."""
             if role != "admin":
                 print(f"[fact ] denied role={role}")
-                await _speak(txt.FACT_DENIED.get(session_lang, txt.FACT_DENIED["en"]))
+                await _speak(turn_text.FACT_DENIED.get(session_lang, turn_text.FACT_DENIED["en"]))
                 return
             # cognify takes seconds; don't block the turn on it. Confirm by
             # voice now and ingest in the background. ingest_fact merges the
@@ -418,7 +430,7 @@ class DialogueOrchestrator:
             task = asyncio.create_task(_bg_ingest())
             _bg_ingest_tasks.add(task)
             task.add_done_callback(_bg_ingest_tasks.discard)
-            await _speak(txt.FACT_CONFIRM.get(session_lang, txt.FACT_CONFIRM["en"]))
+            await _speak(turn_text.FACT_CONFIRM.get(session_lang, turn_text.FACT_CONFIRM["en"]))
 
         async def _delayed_reply(text: str) -> None:
             """Mode-switching wrapper. NOA_REPLY_MODE picks fake/echo/real.
@@ -426,7 +438,7 @@ class DialogueOrchestrator:
             instead of the LLM. Cancellation is handled here so all modes
             share the same barge-in cleanup (stop_audio + status=Listening)."""
             try:
-                fact = txt.extract_fact(text)
+                fact = turn_text.extract_fact(text)
                 if fact is not None:
                     print(f"[route] fact=True role={role} chars={len(fact)}")
                     await _handle_fact(fact)
@@ -434,7 +446,7 @@ class DialogueOrchestrator:
                 if _REPLY_MODE == "real":
                     await _reply_with_tts(text, dialogue.respond_stream)
                 elif _REPLY_MODE == "echo":
-                    # Mock echo doesn't support streaming yet, but we'll use 
+                    # Mock echo doesn't support streaming yet, but we'll use
                     # the old _reply_with_tts logic for it or just wrap it.
                     # For now, let's just wrap it in a dummy generator.
                     async def _echo_stream(t, c):
@@ -548,7 +560,7 @@ class DialogueOrchestrator:
         async def _greet() -> None:
             # Random greeting per session, in the session language —
             # synthesized on demand (no fixed cached phrase).
-            pool = txt.GREETINGS.get(session_lang, txt.GREETINGS["en"])
+            pool = turn_text.GREETINGS.get(session_lang, turn_text.GREETINGS["en"])
             phrase = random.choice(pool)
             print(f"[greet] mode={_REPLY_MODE} lang={session_lang} "
                   f"phrase={phrase!r}")
