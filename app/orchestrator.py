@@ -263,12 +263,14 @@ class DialogueOrchestrator:
             # Start Cognee search in parallel with filler preparation
             ctx_task = asyncio.create_task(_get_context())
 
-            # Say a filler immediately to mask Cognee + LLM latency whenever
-            # we're about to hit the graph (any searched turn, not just ones
-            # that parse as questions) — otherwise a slow session lookup on a
-            # short follow-up is dead air. Only if not in fake mode.
+            # Say a filler to mask Cognee + LLM latency — but only when the
+            # turn actually reads as a question/recall. In session mode
+            # should_search is True for EVERY turn (so the session thread sees
+            # them all), which would otherwise make Noa stall-talk ("let me
+            # look that up") on a plain "Hi". Gate the spoken filler on the
+            # question heuristic, not on should_search. Only if not fake mode.
             filler_task = None
-            if should_search and _REPLY_MODE != "fake":
+            if is_question and _REPLY_MODE != "fake":
                 nonlocal last_filler
                 pool = turn_text.FILLERS.get(session_lang, turn_text.FILLERS["en"])
                 filler_phrase = turn_text.pick_filler(pool, last_filler)
