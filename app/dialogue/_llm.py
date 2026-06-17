@@ -27,21 +27,23 @@ class OpenAILLM(LLMProvider):
             "role": "system", "content": system_prompt(language)
         }
 
-    async def respond(self, user_text: str, context: str | None = None) -> str:
+    def _build_messages(self, user_text: str, context: str | None) -> list[dict]:
         # Persist only the raw user turn to history. Retrieved context is
         # transient: injected into this one request, never stored, so it
         # doesn't bloat or skew later turns.
         self._history.append({"role": "user", "content": user_text})
         if context:
-            messages = self._history[:-1] + [
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nUser: {user_text}",
-                }
-            ]
+            messages = self._history[:-1] + [{
+                "role": "user",
+                "content": f"Context:\n{context}\n\nUser: {user_text}",
+            }]
         else:
             messages = self._history
         log_llm_request(messages, context)
+        return messages
+
+    async def respond(self, user_text: str, context: str | None = None) -> str:
+        messages = self._build_messages(user_text, context)
         completion = await self._client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=messages,
@@ -53,18 +55,7 @@ class OpenAILLM(LLMProvider):
     async def respond_stream(
         self, user_text: str, context: str | None = None
     ) -> AsyncGenerator[str, None]:
-        self._history.append({"role": "user", "content": user_text})
-        if context:
-            messages = self._history[:-1] + [
-                {
-                    "role": "user",
-                    "content": f"Context:\n{context}\n\nUser: {user_text}",
-                }
-            ]
-        else:
-            messages = self._history
-
-        log_llm_request(messages, context)
+        messages = self._build_messages(user_text, context)
         stream = await self._client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=messages,
