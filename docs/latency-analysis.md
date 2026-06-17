@@ -56,5 +56,25 @@ A second trace was analyzed after initial adjustments.
 | **Cognee Search** | 4-8s | 0.2s (failed) | < 0.5s |
 | **TTFA (Total)** | 10-12s | 5.3-9s | < 2s |
 
+## Run 3: Fixes Applied (2026-06-17)
+
+Three targeted changes to cut the two worst offenders (Cognee retrieve + ingest):
+
+1. **Live retrieval no longer pays for Cognee's own LLM.** Session turns
+   (`COGNEE_SESSIONS=true`) used to force `SearchType.GRAPH_COMPLETION` on every
+   turn — a second LLM call inside Cognee whose generated answer we discard
+   (`only_context=True`). Sessions now use the same fast per-intent routing as
+   non-session turns; only `relationship`-phrased queries still use graph
+   completion. Expected: live `recall`/`search` drops from 4–8s to sub-second.
+2. **Faster fact ingestion.** `add_document` now calls `remember(...,
+   self_improvement=False)`, dropping the follow-up reconciliation LLM pass (the
+   main cost in the ~63s ingest). Base cognify + uuid5 entity dedup still run.
+   Ingestion is already off the live path (orchestrator backgrounds it), so this
+   makes facts queryable sooner / frees the worker faster — it does not change
+   perceived speaking latency.
+3. **Tighter prompt memory rules** (~16 lines → ~4): cut the sub-rules that made
+   Noa lecture users on wake-phrase syntax, which produced rambling multi-sentence
+   replies against the 1–2 sentence cap.
+
 ## Conclusion
 Reducing first‑chunk latency in a voice agent requires more than just a fast TTS model. It demands an end‑to‑end streaming architecture that overlaps ASR, LLM, TTS and playback. For open‑source, local deployment in English, Piper and Kokoro currently provide the fastest first‑chunk performance, delivering audio in under 100–300 ms on commodity hardware. Chatterbox‑Turbo offers a good compromise between speed and expressiveness with sub‑200 ms latency. NeuTTS Air demonstrates that high‑quality voice cloning can be done on‑device in real time. Whichever model you choose, stream the LLM output sentence by sentence and pre‑load the model to ensure your agent responds as quickly as a human.

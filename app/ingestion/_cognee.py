@@ -428,16 +428,24 @@ async def add_document(text: str, user_id: str, dataset_name: str) -> bool:
     dataset_name = _safe(dataset_name)
     cognee = _get_cognee()
     user = await _resolve_user(user_id)
-    await cognee.remember(text, dataset_name=dataset_name, user=user)
+    # self_improvement=False drops remember()'s follow-up reconciliation LLM
+    # pass — the main cost in the ~63s ingest. Entity dedup (uuid5 of names)
+    # still happens in the base cognify; we only skip the extra improve step,
+    # which is the recommended setting for conversational memory.
+    await cognee.remember(
+        text, dataset_name=dataset_name, user=user, self_improvement=False
+    )
     _invalidate_local_cache(safe_user_id, dataset_name)
     return True
 
 
-# Search types cognee threads session history through (per cognee docs:
-# only GRAPH_COMPLETION / RAG_COMPLETION / TRIPLET_COMPLETION use sessions).
-# When the session experiment is on we force fact-style intents onto
-# GRAPH_COMPLETION so a session_id actually carries conversation memory.
-_SESSION_SEARCH_TYPE = "GRAPH_COMPLETION"
+# Sessions used to force GRAPH_COMPLETION so a session_id carried conversation
+# memory — but that mode runs a second LLM call inside cognee (graph traversal +
+# completion) before Noa's own LLM starts: two serial round-trips per turn. We
+# already pass only_context=True and throw cognee's generated answer away, so
+# paying for it was pure latency. Sessions now use the same fast per-intent
+# routing as everything else; session_id is still threaded for the cheap
+# session-eligible types and ignored otherwise.
 
 
 async def _search_cognee(
@@ -465,12 +473,11 @@ async def _search_cognee(
         return "", "ERROR", 0
     _dt_ds = (time.perf_counter() - _t_ds) * 1000
 
-    # Session experiment: route to GRAPH_COMPLETION (a session-eligible type)
-    # so the passed session_id threads prior Q&A into the prompt. Otherwise
-    # keep the latency-cheap per-intent routing.
-    if session_id is not None:
-        search_type = SearchType.GRAPH_COMPLETION
-    elif intent == "exact_lookup":
+    # Latency-cheap per-intent routing, used for session and non-session turns
+    # alike. Only `relationship` pays for graph+LLM completion — the one case
+    # where multi-hop reasoning is worth it. Everything else stays on a fast
+    # lexical/vector pass and lets Noa's own LLM write the final answer.
+    if intent == "exact_lookup":
         search_type = SearchType.CHUNKS_LEXICAL
     elif intent == "summary":
         search_type = SearchType.GRAPH_SUMMARY_COMPLETION
