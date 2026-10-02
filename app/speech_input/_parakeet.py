@@ -4,7 +4,7 @@ Runs NVIDIA's Parakeet TDT 0.6b v3 on the Apple GPU via Apple's MLX
 framework. v3 is multilingual (EN + DE + 23 more, auto language detect),
 so a single model serves every supported language. Parakeet TDT is
 non-autoregressive — fast enough that one model covers both live partials
-and the final transcript, with no tiny/small split (unlike WhisperASR).
+and the final transcript, with no tiny/small split.
 
 Model: mlx-community/parakeet-tdt-0.6b-v3 (CC-BY-4.0). Downloaded from
 Hugging Face on first use (~600MB) and cached.
@@ -26,8 +26,8 @@ class ParakeetASR(ASRProvider):
     """Single multilingual Parakeet model for both partials and finals.
 
     v3 auto-detects language, so set_language() is only advisory and the
-    model itself never switches — the method exists to satisfy the same
-    interface WhisperASR exposes (SpeechInputService.set_language calls it).
+    model itself never switches — the method exists to satisfy the ASR
+    interface (SpeechInputService.set_language calls it).
     """
 
     def __init__(self, language: str = "en") -> None:

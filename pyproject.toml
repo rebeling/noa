@@ -5,22 +5,18 @@ description = "voice agent"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "cognee>=1.1.0",
     "fastapi>=0.136.1",
-    "faster-whisper>=1.2.1",
     "jinja2>=3.1.6",
     "kokoro-onnx>=0.5.0",
     "openai>=2.37.0",
     "bcrypt>=4.1.0",
-    "pipecat-ai>=1.2.1",
     "pydantic-settings>=2.14.1",
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.29",
     "soundfile>=0.13.1",
-    "torch>=2.12.0",
-    "torchaudio>=2.11.0",
     "uvicorn>=0.47.0",
     "piper-tts>=1.4.2",
     "parakeet-mlx>=0.5.1",
     "anthropic>=0.107.0",
+    "pysilero-vad>=3.4.0",
 ]

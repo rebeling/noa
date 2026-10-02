@@ -3,7 +3,7 @@
 Public surface: SpeechInputService. Internals (_vad, _asr, _turn) are
 private. No other pipeline part imports this package's internals.
 
-Lazy loading: the heavy ASR import (faster_whisper) is deferred to
+Lazy loading: the heavy ASR import (parakeet_mlx) is deferred to
 first transcribe() call, so `import app.speech_input` stays cheap and
 the server boots fast. VAD and TurnDetector are pure-Python and light,
 so they import at module scope.
@@ -23,7 +23,7 @@ _SUPPORTED_LANGS = {"en", "de"}
 class SpeechInputService:
     """Owns VAD, turn detection, and ASR for one session.
 
-    VAD + turn detection are ready immediately. The Whisper model loads
+    VAD + turn detection are ready immediately. The Parakeet model loads
     lazily on the first transcribe() call — construction is cheap.
     """
 
@@ -35,21 +35,12 @@ class SpeechInputService:
 
     def _get_asr(self):
         """Load the ASR provider on first use. The heavy model import +
-        construction are deferred to here so boot stays fast.
-
-        NOA_ASR selects the engine: 'parakeet' (default) runs Parakeet
-        TDT v3 on the Apple GPU via MLX; 'whisper' falls back to
-        faster-whisper on CPU (non-Apple-Silicon / debugging)."""
+        construction are deferred to here so boot stays fast. Parakeet TDT
+        v3 on the Apple GPU via MLX — Apple Silicon only."""
         if self._asr is None:
-            engine = os.environ.get("NOA_ASR", "parakeet").lower()
-            if engine == "whisper":
-                from app.speech_input._asr import WhisperASR
+            from app.speech_input._parakeet import ParakeetASR
 
-                self._asr = WhisperASR(language=self._language)
-            else:
-                from app.speech_input._parakeet import ParakeetASR
-
-                self._asr = ParakeetASR(language=self._language)
+            self._asr = ParakeetASR(language=self._language)
         return self._asr
 
     def set_language(self, language: str) -> None:

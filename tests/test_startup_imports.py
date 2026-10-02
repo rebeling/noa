@@ -6,13 +6,12 @@ import unittest
 
 
 HEAVY_MODULES = (
-    "faster_whisper",
+    "anthropic",
     "kokoro_onnx",
     "openai",
-    "presidio_analyzer",
-    "presidio_anonymizer",
-    "spacy",
-    "torch",
+    "parakeet_mlx",
+    "piper",
+    "pysilero_vad",
 )
 
 

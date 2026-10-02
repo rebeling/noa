@@ -1,7 +1,7 @@
 """Synthesis part — text-to-speech.
 
 Public surface: SynthesisService. The English provider is selected at
-runtime via `NOA_TTS_PROVIDER=kokoro|piper|styletts2` (default: kokoro).
+runtime via `NOA_TTS_PROVIDER=kokoro|piper` (default: kokoro).
 German always uses Piper (Kokoro v1.0 ships no German voice), via a
 German voice file configured by `NOA_PIPER_DE_VOICE`.
 
@@ -10,7 +10,7 @@ the active one from the session language (set at construction and
 switchable mid-session via set_language). Each provider is in its own
 underscore-private module and shares the TTSProvider contract.
 
-Lazy loading: heavy imports (kokoro_onnx, piper, styletts2) are
+Lazy loading: heavy imports (kokoro_onnx, piper) are
 deferred to the first synth/warmup call so `import app.synthesis`
 stays cheap regardless of which provider is selected.
 """
@@ -79,9 +79,6 @@ class SynthesisService:
         if name == "piper":
             from app.synthesis._piper import PiperTTS
             candidate = PiperTTS()
-        elif name == "styletts2":
-            from app.synthesis._styletts2 import StyleTTS2
-            candidate = StyleTTS2()
         elif name == "kokoro":
             from app.synthesis._kokoro import KokoroTTS
             candidate = KokoroTTS()
