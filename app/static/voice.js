@@ -275,7 +275,9 @@
       source.connect(micAnalyser);
       bindMicAnalyser();
 
-      processor=audioContext.createScriptProcessor(4096,1,1);
+      // 2048 samples @16kHz = 128ms per frame = 4 Silero frames. Smaller
+      // frames -> finer end-of-turn timing; 2048 keeps WS message rate sane.
+      processor=audioContext.createScriptProcessor(2048,1,1);
       const proto=location.protocol==='https:'?'wss:':'ws:';
       const wsToken=document.querySelector('meta[name="ws-token"]').content;
       const initialLang=(localStorage.getItem('noaLang')||'en').toLowerCase();

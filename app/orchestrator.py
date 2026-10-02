@@ -46,8 +46,6 @@ _PARTIAL_SLIDE_STEP_BYTES = 96000  # ~3s
 # If a fresh partial landed within this window before vad_end, reuse it
 # as final instead of re-transcribing the whole turn audio.
 _FINAL_REUSE_PARTIAL_SECS = 0.8
-# VAD reads the most recent slice of this many bytes.
-_VAD_WINDOW_BYTES = 4000
 # When idle, trim the buffer back to this many trailing bytes.
 _IDLE_BUFFER_KEEP = 8000
 _IDLE_BUFFER_MAX = 32000
@@ -479,15 +477,12 @@ class DialogueOrchestrator:
                 if not chunk:
                     continue
                 audio_buffer.extend(chunk)
-                if len(audio_buffer) < _VAD_WINDOW_BYTES:
-                    continue
 
                 t_vad = time.perf_counter()
-                window = AudioChunk(data=bytes(audio_buffer[-_VAD_WINDOW_BYTES:]))
-                transition = speech.detect(window)
+                transition = speech.detect(AudioChunk(data=chunk))
                 dt_vad = (time.perf_counter() - t_vad) * 1000
                 if dt_vad > 5.0:
-                    print(f"[vad  ] slow: {dt_vad:.1f}ms (window={_VAD_WINDOW_BYTES}B)")
+                    print(f"[vad  ] slow: {dt_vad:.1f}ms (chunk={len(chunk)}B)")
 
                 if transition == "start":
                     last_partial = ""

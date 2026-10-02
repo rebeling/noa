@@ -5,19 +5,40 @@ private. No other pipeline part imports this package's internals.
 
 Lazy loading: the heavy ASR import (parakeet_mlx) is deferred to
 first transcribe() call, so `import app.speech_input` stays cheap and
-the server boots fast. VAD and TurnDetector are pure-Python and light,
-so they import at module scope.
+the server boots fast. AmplitudeVAD and TurnDetector are light and
+import at module scope; SileroVAD loads its model inside _build_vad.
 """
 
 import os
 
-from app.contracts import AudioChunk
+from app.contracts import SAMPLE_RATE, SAMPLE_WIDTH, AudioChunk
 from app.speech_input._turn import TurnDetector
 from app.speech_input._vad import AmplitudeVAD
 
 __all__ = ["SpeechInputService"]
 
 _SUPPORTED_LANGS = {"en", "de"}
+
+# VAD thresholds per provider. Silero outputs a calibrated speech
+# probability; the amplitude heuristic is scaled so 0.4 ≈ "voice".
+_VAD_THRESHOLDS = {
+    "silero": (0.5, 0.35),
+    "amplitude": (0.4, 0.2),
+}
+
+
+def _build_vad(name: str):
+    """Return (vad_provider, resolved_name). Falls back to amplitude if
+    Silero cannot initialise (missing wheel/model) so a session always has
+    a working VAD."""
+    if name == "silero":
+        try:
+            from app.speech_input._silero import SileroVAD
+
+            return SileroVAD(), "silero"
+        except Exception as e:  # noqa: BLE001
+            print(f"[vad  ] silero init failed ({e}); falling back to amplitude")
+    return AmplitudeVAD(), "amplitude"
 
 
 class SpeechInputService:
@@ -28,8 +49,11 @@ class SpeechInputService:
     """
 
     def __init__(self, language: str = "en") -> None:
-        self._vad = AmplitudeVAD()
-        self._turn = TurnDetector()
+        requested = os.environ.get("NOA_VAD", "silero").lower()
+        self._vad, vad_name = _build_vad(requested)
+        start_conf, silence_conf = _VAD_THRESHOLDS[vad_name]
+        self._turn = TurnDetector(start_conf, silence_conf)
+        print(f"[vad  ] provider={vad_name} start>{start_conf} silence<{silence_conf}")
         self._asr = None  # built lazily — see _get_asr()
         self._language = language if language in _SUPPORTED_LANGS else "en"
 
@@ -58,10 +82,12 @@ class SpeechInputService:
         return self._turn.is_speaking
 
     def detect(self, chunk: AudioChunk) -> str | None:
-        """Run VAD on `chunk`, update turn state.
+        """Run VAD on the newly received `chunk` (every byte, in order —
+        Silero is stateful), update turn state.
         Returns 'start', 'end', or None."""
         confidence = self._vad.speech_confidence(chunk)
-        return self._turn.on_confidence(confidence)
+        audio_secs = len(chunk.data) / (SAMPLE_RATE * SAMPLE_WIDTH)
+        return self._turn.on_confidence(confidence, audio_secs)
 
     def transcribe(self, audio: bytes, partial: bool) -> str:
         """Transcribe accumulated turn audio. Loads the ASR model on the
