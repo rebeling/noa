@@ -263,7 +263,16 @@ class DialogueOrchestrator:
 
             chunks = 0
             total_bytes = 0
-            await asyncio.gather(sentence_producer(), sentence_consumer())
+            producer = asyncio.create_task(sentence_producer())
+            consumer = asyncio.create_task(sentence_consumer())
+            try:
+                await asyncio.gather(producer, consumer)
+            finally:
+                # If one side failed, gather re-raises but leaves the other
+                # running (an orphan LLM stream or TTS loop). Cancel it.
+                for task in (producer, consumer):
+                    if not task.done():
+                        task.cancel()
             print(f"[turn ] full reply: {(time.perf_counter() - t0)*1000:.0f}ms "
                   f"chunks={chunks} bytes={total_bytes}")
             await _safe_send_text(websocket, json.dumps(
@@ -294,6 +303,15 @@ class DialogueOrchestrator:
                 await _safe_send_text(websocket, json.dumps(
                     {"type": "status", "text": "Listening..."}))
                 raise
+            except Exception as e:  # noqa: BLE001
+                # LLM/TTS failure (bad key, model 404, rate limit, ...):
+                # tell the client so it leaves Processing/Speaking instead
+                # of hanging, and keep the cause in the server log.
+                print(f"[reply] failed: {e!r}")
+                await _safe_send_text(websocket, json.dumps(
+                    {"type": "response", "text": "(reply failed — see server log)"}))
+                await _safe_send_text(websocket, json.dumps(
+                    {"type": "status", "text": "Waiting..."}))
 
 
         bus.subscribe(PartialTranscript, on_partial)

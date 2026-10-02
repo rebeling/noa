@@ -8,6 +8,7 @@ Streams audio per phrase. On typical CPU hardware Piper produces
 first audio in 200–500ms for short replies, vs Kokoro's 2–6s.
 """
 
+import asyncio
 import io
 import os
 import time
@@ -102,18 +103,18 @@ class PiperTTS(TTSProvider):
         if not self._piper or not text:
             return
         t0 = time.perf_counter()
-        t_prev = t0
-        idx = 0
-        for ac in self._piper.synthesize(text):
+        # Piper inference is synchronous CPU work (50-900ms per segment).
+        # Run it off the event loop so VAD, barge_in and LLM token reads
+        # keep flowing while a segment renders.
+        chunks = await asyncio.to_thread(
+            lambda: list(self._piper.synthesize(text)))
+        t_synth = time.perf_counter()
+        for idx, ac in enumerate(chunks):
             wav = _pcm_to_wav(ac.audio_int16_bytes, self._sample_rate)
-            now = time.perf_counter()
             audio_secs = len(ac.audio_int16_bytes) / 2 / self._sample_rate
             print(f"[tts stream] piper chunk={idx} "
-                  f"since_prev={(now-t_prev)*1000:.0f}ms "
-                  f"since_start={(now-t0)*1000:.0f}ms "
+                  f"synth={(t_synth-t0)*1000:.0f}ms "
                   f"audio={audio_secs*1000:.0f}ms bytes={len(wav)}")
-            t_prev = now
-            idx += 1
             yield wav
         print(f"[tts stream] done total={int((time.perf_counter()-t0)*1000)}ms "
-              f"chunks={idx} chars={len(text)}")
+              f"chunks={len(chunks)} chars={len(text)}")
