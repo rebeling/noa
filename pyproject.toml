@@ -14,9 +14,12 @@ dependencies = [
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.29",
     "soundfile>=0.13.1",
-    "uvicorn>=0.47.0",
+    "uvicorn[standard]>=0.47.0",
     "piper-tts>=1.4.2",
     "parakeet-mlx>=0.5.1",
     "anthropic>=0.107.0",
     "pysilero-vad>=3.4.0",
 ]
+
+[dependency-groups]
+dev = []

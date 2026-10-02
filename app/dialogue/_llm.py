@@ -20,6 +20,11 @@ class OpenAILLM(LLMProvider):
             {"role": "system", "content": system_prompt(language)}
         ]
 
+    async def warmup(self) -> None:
+        """Open the HTTPS connection pool with a cheap request so the
+        first real turn doesn't pay DNS + TLS + HTTP/2 setup (~1s)."""
+        await self._client.models.retrieve(settings.LLM_MODEL)
+
     def set_language(self, language: str) -> None:
         """Swap the reply language mid-session by rewriting the system
         prompt in place. Conversation history is preserved."""

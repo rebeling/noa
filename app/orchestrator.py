@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import random
-import re
 import time
 
 from fastapi import WebSocketDisconnect
@@ -64,9 +63,6 @@ _ECHO_LLM_MAX_SECS = 2.5
 #   'real' — real LLM + real TTS
 _REPLY_MODE = os.environ.get("NOA_REPLY_MODE", "fake").lower()
 
-# Sentence boundary for streaming TTS chunking: punctuation followed by
-# whitespace. Module scope so it compiles once, not per reply turn.
-_SENTENCE_END = re.compile(r"([.!?])\s+")
 
 
 def _is_open(ws) -> bool:
@@ -124,7 +120,7 @@ class DialogueOrchestrator:
               f"user_id={user_id} role={role} dataset={dataset_name} "
               f"shared_tts={using_shared}")
         # session language is mutable via set_language; capture in a holder
-        # the closures read so a mid-session switch reaches fact confirm/deny.
+        # the closures read so a mid-session switch reaches the greeting pool.
         session_lang = language
 
 
@@ -213,22 +209,24 @@ class DialogueOrchestrator:
             sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
             async def sentence_producer():
-                """Consume the LLM token stream, split on sentence boundaries,
-                push each sentence. The finally guarantees the None sentinel
-                even if llm_stream_call raises, so the consumer never blocks
+                """Consume the LLM token stream, cut it into speakable
+                segments (clause-short first segment, then full sentences),
+                push each one. The finally guarantees the None sentinel even
+                if llm_stream_call raises, so the consumer never blocks
                 forever. The exception still propagates via gather."""
                 buffer = ""
+                emitted_first = False
                 try:
                     async for chunk in llm_stream_call(text):
                         buffer += chunk
                         while True:
-                            match = _SENTENCE_END.search(buffer)
-                            if not match:
+                            segment, buffer = turn_text.split_segment(
+                                buffer, first=not emitted_first)
+                            if segment is None:
                                 break
-                            sentence = buffer[:match.end()].strip()
-                            buffer = buffer[match.end():]
-                            if sentence:
-                                await sentence_queue.put(sentence)
+                            if segment:
+                                emitted_first = True
+                                await sentence_queue.put(segment)
                     remaining = buffer.strip()
                     if remaining:
                         await sentence_queue.put(remaining)
@@ -417,6 +415,13 @@ class DialogueOrchestrator:
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
+        # Warm the LLM connection while the greeting plays (real mode only —
+        # fake/echo never call the API). Fire-and-forget; the first turn
+        # awaits nothing here, it just finds the pool already open.
+        llm_warmup: asyncio.Task | None = None
+        if _REPLY_MODE == "real":
+            llm_warmup = asyncio.create_task(dialogue.warmup())
+            llm_warmup.add_done_callback(lambda t: t.cancelled() or t.exception())
         try:
             await _greet()
         except Exception as e:  # noqa: BLE001

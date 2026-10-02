@@ -26,6 +26,11 @@ class ClaudeLLM(LLMProvider):
         # user/assistant turns only — system is passed separately each call.
         self._history: list[dict] = []
 
+    async def warmup(self) -> None:
+        """Open the HTTPS connection pool with a cheap request so the
+        first real turn doesn't pay DNS + TLS + HTTP/2 setup (~1s)."""
+        await self._client.models.retrieve(settings.LLM_MODEL)
+
     def set_language(self, language: str) -> None:
         """Swap the reply language mid-session. History is preserved."""
         self._system = system_prompt(language)

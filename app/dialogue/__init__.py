@@ -36,6 +36,19 @@ class DialogueService:
                 self._llm = OpenAILLM(language=self._language)
         return self._llm
 
+    async def warmup(self) -> None:
+        """Build the provider and open its HTTPS connection now, so the
+        first turn's time-to-first-token excludes connection setup. Safe to
+        fire-and-forget; failures only cost the warm start."""
+        import time
+
+        t0 = time.perf_counter()
+        try:
+            await self._get_llm().warmup()
+            print(f"[llm warmup] {(time.perf_counter() - t0)*1000:.0f}ms")
+        except Exception as e:  # noqa: BLE001
+            print(f"[llm warmup] failed: {e}")
+
     def set_language(self, language: str) -> None:
         """Switch reply language. Updates the stored default and, if the
         LLM is already built, rewrites its system prompt in place."""
