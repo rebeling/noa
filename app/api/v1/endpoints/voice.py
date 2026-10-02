@@ -29,12 +29,12 @@ async def voice_websocket(
     # No fixed greeting: the orchestrator picks a random greeting per
     # session in the session language.
     orchestrator = DialogueOrchestrator(shared_tts=shared_tts)
-    # sub is the tenant id; cognee scopes every query to it. Falls back
-    # to "anonymous" only if the token somehow lacks a subject (decode
-    # already rejects sub=None, so this is belt-and-suspenders).
+    # sub identifies the user for logging. Falls back to "anonymous" only
+    # if the token somehow lacks a subject (decode already rejects
+    # sub=None, so this is belt-and-suspenders).
     user_id = payload.sub or "anonymous"
-    # role gates fact-ingestion by voice: admins add facts, customers query
-    # only (CLAUDE.md RBAC, enforced at the gateway not just the UI).
+    # role is carried for future RBAC; nothing in the voice path is
+    # role-gated today (the memory layer that was is gone).
     role = payload.role or "customer"
     try:
         await orchestrator.run_session(

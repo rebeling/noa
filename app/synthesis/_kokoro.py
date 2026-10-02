@@ -1,8 +1,8 @@
 """Kokoro ONNX TTS — internal to synthesis.
 
 Two entrypoints:
-  - synthesize(text): one-shot, returns full WAV bytes. Kept for the
-    ingestion/test path and as a fallback.
+  - synthesize(text): one-shot, returns full WAV bytes. Kept as a
+    fallback / for one-off use.
   - synthesize_stream(text): async generator yielding per-chunk WAV
     bytes as Kokoro produces them. Used by the live reply path so the
     client can start playback on the first chunk instead of waiting

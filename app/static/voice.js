@@ -16,8 +16,7 @@
   let followTranscript = true;
 
   // Reload the page as a different user. The server mints a JWT for this
-  // subject, which becomes the cognee tenant — so the voice session then
-  // queries that user's knowledge graph.
+  // subject; today it only shows up in server logs.
   function switchUser(){
     const v = (document.getElementById('user-input').value || '').trim();
     if(!v) return;

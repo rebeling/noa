@@ -45,15 +45,6 @@
                     <a href="/api/v1/voice" class="text-xl font-bold flex items-center lg:ml-2.5">
                         <span class="self-center whitespace-nowrap" style="color:#7fe6d4;">Noa</span>
                     </a>
-                    <!-- Top Level Menu -->
-                    <div class="flex items-center ml-10 space-x-6">
-                        <a href="/api/v1/ingestion" class="flex items-center {% if page == 'ingestion' %}text-blue-600 font-bold{% else %}text-gray-600{% endif %} hover:text-blue-600 font-medium transition duration-150 ease-in-out">
-                            Ingestion
-                        </a>
-                        <a href="/api/v1/graph" class="flex items-center {% if page == 'graph' %}text-blue-600 font-bold{% else %}text-gray-600{% endif %} hover:text-blue-600 font-medium transition duration-150 ease-in-out">
-                            Knowledge Graph
-                        </a>
-                    </div>
                 </div>
                 <!-- Language toggle. Persists to localStorage.noaLang.
                      Read by voice.html when opening the WebSocket. -->

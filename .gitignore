@@ -17,8 +17,6 @@ kokoro-v1.0.onnx
 # Local development TLS certificate — never commit
 certs/
 
-# Cognee runtime storage (per-tenant graph/vector/sqlite) — never commit
-.cognee_data/
 .claude
 CLAUDE.md
 AGENTS.md
