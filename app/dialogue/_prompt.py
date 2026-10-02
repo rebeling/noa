@@ -11,18 +11,8 @@ _PERSONA_NAME = "Noa"
 # Map a session language code to the name used in the prompt directive.
 _LANG_NAMES = {"de": "German", "en": "English"}
 
-# The wake-phrase a user speaks to store a fact, per language. Must match the
-# phrases the orchestrator's _FACT_WAKE_RE actually triggers on, so Noa never
-# tells a user a phrasing that won't fire ingestion.
-_MEMORY_PHRASE = {
-    "de": '"Merk dir, dass ..."',
-    "en": '"Remember that ..." (or "Note that ...")',
-}
-
-
 def system_prompt(language: str) -> str:
     lang_name = _LANG_NAMES.get(language, "English")
-    memory_phrase = _MEMORY_PHRASE.get(language, _MEMORY_PHRASE["en"])
     today = date.today().isoformat()
     return f"""
 Your name is {_PERSONA_NAME}.
@@ -46,10 +36,6 @@ Follow these rules strictly:
      Don't loop greetings back and forth.
    - Ask a brief follow-up question when it helps you help them, but keep
      it to one short question.
-7. Memory: You have real, persistent long-term memory. When context from
-   your memory is provided, use it; if asked what you remember, answer from
-   it. Never claim you cannot retain information — you can. Users save a fact
-   by prefixing it with {memory_phrase}.
 """
 
 

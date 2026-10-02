@@ -3,11 +3,6 @@
 Owns the event bus and one instance of each part per session. The only
 module that imports every part. Nothing imports the orchestrator except
 the API layer.
-
-LLM + TTS are wired through the bus but, matching the prior code, the
-session loop currently emits a stub response for ASR-only latency
-measurement. Re-enabling the full path is a one-line change in
-on_turn_ended, not a structural one.
 """
 
 import asyncio
@@ -16,9 +11,6 @@ import os
 import random
 import re
 import time
-import uuid
-
-from app.core.config import settings
 
 from fastapi import WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -27,13 +19,11 @@ from app.contracts import (
     AudioChunk,
     FinalTranscript,
     PartialTranscript,
-    ResponseText,
     SpeechStarted,
     TurnEnded,
 )
 from app.bus import EventBus
 from app.dialogue import DialogueService
-from app.ingestion import IngestionService
 from app.speech_input import SpeechInputService
 from app.synthesis import SynthesisService, postprocess_for_speech
 from app import _turn_text as turn_text
@@ -68,14 +58,6 @@ _FAKE_SPEAKING_SECS = 3.0
 # Echo-LLM delay range: simulates LLM latency without an API call.
 _ECHO_LLM_MIN_SECS = 1.0
 _ECHO_LLM_MAX_SECS = 2.5
-# Max time the reply path waits on a Cognee search before giving up and
-# answering ungrounded. The search is on the critical path (the LLM can't
-# start until context resolves). The filler ("give me a second…") plays
-# while we wait, so the budget is the filler's cover, not dead air — set it
-# high enough for the slow GRAPH_COMPLETION/session path (4-8s in logs),
-# which is the whole point of a knowledge assistant. Past the budget we drop
-# context rather than hang forever. Override with NOA_CONTEXT_BUDGET_SECS.
-_CONTEXT_BUDGET_SECS = float(os.environ.get("NOA_CONTEXT_BUDGET_SECS", "12.0"))
 # Reply mode:
 #   'fake' — timed stub, no LLM, no TTS (offline plumbing test)
 #   'echo' — mock LLM (1.0–2.5s delay, echoes input), real TTS
@@ -128,7 +110,6 @@ class DialogueOrchestrator:
         bus = EventBus()
         speech = SpeechInputService(language=language)
         dialogue = DialogueService(language=language)
-        ingestion = IngestionService()  # cognee loads lazily on first query
         # The shared, pre-warmed TTS is English-only. Reuse it for English
         # sessions (warm start); build a fresh per-session instance for
         # other languages so we never mutate the shared instance's
@@ -146,17 +127,6 @@ class DialogueOrchestrator:
         # the closures read so a mid-session switch reaches fact confirm/deny.
         session_lang = language
 
-        # Last filler phrase spoken this session — so turn_text.pick_filler never
-        # repeats the same line twice in a row.
-        last_filler: str | None = None
-
-        # cognee-sessions experiment: one session id per WebSocket connection,
-        # scoped to the tenant so threads never cross users. None when the
-        # toggle is off → retrieval keeps its default (lexical) path.
-        cognee_session_id = (
-            f"noa_{user_id}_{uuid.uuid4().hex[:8]}"
-            if settings.COGNEE_SESSIONS else None
-        )
 
         # --- event handlers: parts never call each other directly ---
         async def on_partial(event: PartialTranscript) -> None:
@@ -186,6 +156,9 @@ class DialogueOrchestrator:
                 return
             await _safe_send_text(websocket, json.dumps(
                 {"type": "transcript", "text": text}))
+            # t0 = when the user stopped talking (vad_end). Typed input has
+            # no vad_end, so it starts the clock now.
+            t0 = turn_end_t0 if turn_end_t0 is not None else time.perf_counter()
             if turn_end_t0 is not None:
                 dt = (time.perf_counter() - turn_end_t0) * 1000
                 print(f"[turn ] vad_end -> transcript_sent: {dt:6.0f}ms")
@@ -193,7 +166,7 @@ class DialogueOrchestrator:
             # Cancel any prior in-flight reply (shouldn't happen, but safe).
             if pending_reply is not None and not pending_reply.done():
                 pending_reply.cancel()
-            pending_reply = asyncio.create_task(_delayed_reply(text))
+            pending_reply = asyncio.create_task(_delayed_reply(text, t0))
 
         async def _fake_reply(text: str) -> None:
             """Debug path: two timed phases, no LLM, no TTS.
@@ -212,9 +185,8 @@ class DialogueOrchestrator:
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
-        async def _echo_llm(text: str, context: str | None = None) -> str:
-            """Mock LLM: wait 1.0–2.5s, return input verbatim. Ignores
-            context (no retrieval in echo mode).
+        async def _echo_llm(text: str) -> str:
+            """Mock LLM: wait 1.0–2.5s, return input verbatim.
             Lets us exercise the full Processing/Speaking + TTS path
             without an OpenAI call. Same await semantics as the real
             LLM, so barge-in cancels cleanly."""
@@ -225,95 +197,29 @@ class DialogueOrchestrator:
                   f"(target={delay*1000:.0f}ms) chars={len(text)}")
             return text
 
-        async def _reply_with_tts(text: str, llm_stream_call) -> None:
-            """Shared path: status=Processing → [retrieve] → llm_stream_call
-            → status=Speaking → streamed TTS chunks → status=Waiting.
-            `llm_stream_call` is an async generator callable (user_text,
-            context) → chunks.
+        async def _reply_with_tts(text: str, llm_stream_call, t0: float) -> None:
+            """status=Processing → llm_stream_call → status=Speaking →
+            streamed TTS chunks → status=Waiting. `llm_stream_call` is an
+            async generator callable (user_text) → text chunks. `t0` is when
+            the user stopped talking; first audio is reported relative to it.
 
-            This version implements 'streaming-to-streaming' with a producer-consumer
-            queue to overlap LLM generation and TTS synthesis, minimizing TTFA."""
-            t_turn_start = time.perf_counter()
+            Producer splits the LLM token stream into sentences; consumer
+            synthesizes each one the moment it is ready, so TTS for sentence
+            N overlaps LLM generation of sentence N+1."""
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Processing..."}))
-
-            # In session mode every turn goes to cognee so the conversational
-            # session threads context across short follow-ups ("Yes.",
-            # "Mr. Rebel") that the question heuristic would otherwise skip —
-            # exactly the turns where a knowledge lookup is wanted. Without
-            # session mode, keep the cheap question gate so we don't pay the
-            # lexical search on every utterance.
-            is_question = turn_text.looks_like_question(text)
-            should_search = is_question or cognee_session_id is not None
-            context = None
-
-            async def _get_context():
-                nonlocal context
-                if should_search:
-                    result = await ingestion.query_with_meta(
-                        text, user_id, dataset_name,
-                        session_id=cognee_session_id,
-                    )
-                    context = result.context or None
-                    print(f"[trace] cognee search: {result.elapsed_ms}ms "
-                          f"source={result.source} hit_count={result.hit_count}")
-                else:
-                    print("[trace] cognee skip: 0ms (not a question)")
-
-            # Start Cognee search in parallel with filler preparation
-            ctx_task = asyncio.create_task(_get_context())
-
-            # Say a filler to mask Cognee + LLM latency — but only when the
-            # turn actually reads as a question/recall. In session mode
-            # should_search is True for EVERY turn (so the session thread sees
-            # them all), which would otherwise make Noa stall-talk ("let me
-            # look that up") on a plain "Hi". Gate the spoken filler on the
-            # question heuristic, not on should_search. Only if not fake mode.
-            filler_task = None
-            if is_question and _REPLY_MODE != "fake":
-                nonlocal last_filler
-                pool = turn_text.FILLERS.get(session_lang, turn_text.FILLERS["en"])
-                filler_phrase = turn_text.pick_filler(pool, last_filler)
-                last_filler = filler_phrase
-                async def _say_filler():
-                    print(f"[trace] speaking filler: {filler_phrase!r}")
-                    await _safe_send_text(websocket, json.dumps(
-                        {"type": "status", "text": "Speaking..."}))
-                    await _safe_send_text(websocket, json.dumps(
-                        {"type": "response", "text": filler_phrase}))
-                    async for chunk in synthesis.synthesize_stream(filler_phrase):
-                        await _safe_send_bytes(websocket, chunk)
-                filler_task = asyncio.create_task(_say_filler())
-
-            # Wait for Cognee but cap the time so we don't hang forever
-            done, _ = await asyncio.wait({ctx_task}, timeout=_CONTEXT_BUDGET_SECS)
-            if ctx_task not in done:
-                ctx_task.cancel()
-                ctx_task.add_done_callback(lambda t: t.cancelled() or t.exception())
-                print(f"[trace] cognee search: TIMEOUT >"
-                      f"{_CONTEXT_BUDGET_SECS*1000:.0f}ms -> answering ungrounded")
-
             t_llm_start = time.perf_counter()
 
-            # Sentence queue for the producer-consumer pipeline. The producer
-            # chunks the LLM token stream into sentences; the consumer pulls
-            # each sentence and synthesizes it the moment it's ready, so TTS
-            # for sentence N overlaps LLM generation of sentence N+1. None is
-            # the end-of-stream sentinel.
             sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
             async def sentence_producer():
-                """Consume the LLM token stream, split it on sentence
-                boundaries, and push each sentence to the queue.
-
-                The finally guarantees the None sentinel is always queued —
-                even if llm_stream_call raises mid-stream — so the consumer
-                never blocks forever on an empty queue. The exception still
-                propagates to the gather below.
-                """
+                """Consume the LLM token stream, split on sentence boundaries,
+                push each sentence. The finally guarantees the None sentinel
+                even if llm_stream_call raises, so the consumer never blocks
+                forever. The exception still propagates via gather."""
                 buffer = ""
                 try:
-                    async for chunk in llm_stream_call(text, context):
+                    async for chunk in llm_stream_call(text):
                         buffer += chunk
                         while True:
                             match = _SENTENCE_END.search(buffer)
@@ -323,157 +229,80 @@ class DialogueOrchestrator:
                             buffer = buffer[match.end():]
                             if sentence:
                                 await sentence_queue.put(sentence)
-                    # Flush the trailing partial sentence (no terminal punctuation).
                     remaining = buffer.strip()
                     if remaining:
                         await sentence_queue.put(remaining)
                 finally:
-                    await sentence_queue.put(None)  # end-of-stream sentinel
+                    await sentence_queue.put(None)
 
             async def sentence_consumer():
-                """Pulls sentences from the queue and synthesizes them immediately."""
                 nonlocal chunks, total_bytes
                 first_sentence = True
                 while True:
                     sentence = await sentence_queue.get()
                     if sentence is None:
-                        sentence_queue.task_done()
                         break
-
                     clean = postprocess_for_speech(sentence)
                     if not clean:
-                        sentence_queue.task_done()
                         continue
-
-                    # If the filler is still going, we let it finish.
-                    # BUT: if the first sentence is ready, we want to ensure the
-                    # status is Speaking... (filler might have already set it).
                     if first_sentence:
-                        t_first_sentence_ready = time.perf_counter()
-                        print(f"[trace] llm first sentence ready: {(t_first_sentence_ready - t_llm_start)*1000:.0f}ms")
+                        print(f"[trace] llm first sentence ready: "
+                              f"{(time.perf_counter() - t_llm_start)*1000:.0f}ms")
                         await _safe_send_text(websocket, json.dumps(
                             {"type": "status", "text": "Speaking..."}))
-
-                    # Append this segment's text to the chat bubble.
                     await _safe_send_text(websocket, json.dumps(
                         {"type": "response_chunk", "text": sentence + " "}))
-
                     tts_text = turn_text.apply_tts_pronunciation(clean)
                     async for audio_chunk in synthesis.synthesize_stream(tts_text):
-                        if first_sentence and chunks == 0:
-                            t_first_audio = time.perf_counter()
-                            print(f"[trace] tts first_chunk: {(t_first_audio - t_first_sentence_ready)*1000:.0f}ms")
-                            print(f"[trace] TOTAL TO REAL AUDIO: {(t_first_audio - t_turn_start)*1000:.0f}ms")
+                        if chunks == 0:
+                            now = time.perf_counter()
+                            print(f"[trace] tts first_chunk: "
+                                  f"{(now - t_llm_start)*1000:.0f}ms after llm start")
+                            print(f"[turn ] stop_talking -> first_audio: "
+                                  f"{(now - t0)*1000:6.0f}ms")
                         chunks += 1
                         total_bytes += len(audio_chunk)
                         await _safe_send_bytes(websocket, audio_chunk)
-
                     first_sentence = False
-                    sentence_queue.task_done()
 
             chunks = 0
             total_bytes = 0
-
-            # Start the pipeline
-            producer_task = asyncio.create_task(sentence_producer())
-            consumer_task = asyncio.create_task(sentence_consumer())
-
-            # Wait for the whole pipeline to finish
-            await asyncio.gather(producer_task, consumer_task)
-
-            # Ensure filler is finished if it was long (unlikely with RAG)
-            if filler_task:
-                await filler_task
-
-            t_turn_end = time.perf_counter()
-            print(f"[trace] tts total: {(t_turn_end - t_turn_start)*1000:.0f}ms chunks={chunks}")
-            print(f"[trace] FULL TURN: {(t_turn_end - t_turn_start)*1000:.0f}ms")
-
+            await asyncio.gather(sentence_producer(), sentence_consumer())
+            print(f"[turn ] full reply: {(time.perf_counter() - t0)*1000:.0f}ms "
+                  f"chunks={chunks} bytes={total_bytes}")
             await _safe_send_text(websocket, json.dumps(
                 {"type": "status", "text": "Waiting..."}))
 
-        async def _speak(message: str) -> None:
-            """Send a fixed assistant `message` as text + streamed TTS.
-            Used for fact confirm/deny — no LLM, just voice feedback.
-            In fake mode (no TTS) just sends the text + status."""
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "response", "text": message}))
-            if _REPLY_MODE == "fake":
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "status", "text": "Waiting..."}))
-                return
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Speaking..."}))
-            tts_text = turn_text.apply_tts_pronunciation(message)
-            async for chunk in synthesis.synthesize_stream(tts_text):
-                await _safe_send_bytes(websocket, chunk)
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Waiting..."}))
 
-        async def _handle_fact(fact: str) -> None:
-            """Ingest a spoken fact into the user's cognee graph (admin
-            only). Confirms or refuses by voice."""
-            if role != "admin":
-                print(f"[fact ] denied role={role}")
-                await _speak(turn_text.FACT_DENIED.get(session_lang, turn_text.FACT_DENIED["en"]))
-                return
-            # cognify takes seconds; don't block the turn on it. Confirm by
-            # voice now and ingest in the background. ingest_fact merges the
-            # fact into existing entities (see IngestionService.ingest_fact).
-            async def _bg_ingest() -> None:
-                t0 = time.perf_counter()
-                try:
-                    await ingestion.ingest_fact(fact, user_id, dataset_name)
-                    print(f"[fact ] ingested chars={len(fact)} "
-                          f"{(time.perf_counter()-t0)*1000:.0f}ms")
-                except Exception as e:  # noqa: BLE001
-                    print(f"[fact ] ingest failed: {e}")
-
-            task = asyncio.create_task(_bg_ingest())
-            _bg_ingest_tasks.add(task)
-            task.add_done_callback(_bg_ingest_tasks.discard)
-            await _speak(turn_text.FACT_CONFIRM.get(session_lang, turn_text.FACT_CONFIRM["en"]))
-
-        async def _delayed_reply(text: str) -> None:
+        async def _delayed_reply(text: str, t0: float) -> None:
             """Mode-switching wrapper. NOA_REPLY_MODE picks fake/echo/real.
-            A fact wake-phrase ('Remember that ...') routes to ingestion
-            instead of the LLM. Cancellation is handled here so all modes
-            share the same barge-in cleanup (stop_audio + status=Listening)."""
+            Cancellation is handled here so all modes share the same
+            barge-in cleanup (stop_audio + status=Listening)."""
             try:
-                fact = turn_text.extract_fact(text)
-                if fact is not None:
-                    print(f"[route] fact=True role={role} chars={len(fact)}")
-                    await _handle_fact(fact)
-                    return
                 if _REPLY_MODE == "real":
-                    await _reply_with_tts(text, dialogue.respond_stream)
+                    async def _real_stream(t):
+                        async for chunk in dialogue.respond_stream(t):
+                            yield chunk
+                    await _reply_with_tts(text, _real_stream, t0)
                 elif _REPLY_MODE == "echo":
-                    # Mock echo doesn't support streaming yet, but we'll use
-                    # the old _reply_with_tts logic for it or just wrap it.
-                    # For now, let's just wrap it in a dummy generator.
-                    async def _echo_stream(t, c):
-                        yield await _echo_llm(t, c)
-                    await _reply_with_tts(text, _echo_stream)
+                    async def _echo_stream(t):
+                        yield await _echo_llm(t)
+                    await _reply_with_tts(text, _echo_stream, t0)
                 else:
                     await _fake_reply(text)
             except asyncio.CancelledError:
                 # Barge-in: drop assistant audio on the client and go
                 # back to listening. stop_audio clears the WebAudio queue
-                # in voice.html's onmessage handler.
+                # in voice.js's onmessage handler.
                 await _safe_send_text(websocket, json.dumps({"type": "stop_audio"}))
                 await _safe_send_text(websocket, json.dumps(
                     {"type": "status", "text": "Listening..."}))
                 raise
 
-        async def on_response_text(event: ResponseText) -> None:
-            audio = await asyncio.to_thread(synthesis.synthesize, event.text)
-            if audio:
-                await _safe_send_bytes(websocket, audio)
 
         bus.subscribe(PartialTranscript, on_partial)
         bus.subscribe(SpeechStarted, on_speech_started)
         bus.subscribe(TurnEnded, on_turn_ended)
-        bus.subscribe(ResponseText, on_response_text)
 
         # --- session state ---
         audio_buffer = bytearray()
