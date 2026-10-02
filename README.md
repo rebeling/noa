@@ -1,29 +1,28 @@
-# v1: Voice-Driven Dialogue Assistant
+# Noa — Voice-Driven Dialogue Assistant
 
-A modular, privacy-first voice assistant that can ingest documents into a knowledge graph and hold natural, real-time spoken conversations.
+A modular voice assistant for natural, real-time spoken conversation. All speech models run locally; the LLM is OpenAI or Anthropic.
 
 ## 🚀 Key Features
-- **Real-Time Voice Dialogue**: Low-latency ASR (Whisper) and TTS (Kokoro) orchestrated via Pipecat.
-- **Privacy-First Ingestion**: Automatic PII/PHI redaction using Microsoft Presidio before data enters the knowledge graph.
-- **Knowledge Graph RAG**: Powered by Cognee for advanced reasoning over ingested documents.
-- **Modern Web Dashboard**: Server-driven UI built with FastAPI, Jinja2, and HTMX.
+- **Real-Time Voice Dialogue**: local ASR (Parakeet-MLX on the Apple GPU), Silero VAD, Kokoro/Piper TTS, streamed segment-by-segment.
+- **Natural turn-taking**: 0.5s end-of-turn, barge-in cuts the assistant mid-sentence.
+- **Pluggable LLM**: OpenAI or Anthropic, selected by `LLM_MODEL`.
+
+No memory/knowledge layer at present — removed 2026-10-02, see `docs/superpowers/specs/2026-10-02-remove-graph-layer-pace-design.md`.
 
 ## 🛠️ Technology Stack
-- **Backend**: Python 3.14+, FastAPI
-- **Orchestration**: Pipecat-AI
-- **Knowledge Base**: Cognee (SQLite/LanceDB local backend)
-- **AI Models**: 
-  - **LLM**: OpenAI (GPT-4o)
-  - **ASR**: Faster-Whisper (Local)
-  - **VAD**: Silero-VAD (Local)
-  - **TTS**: Kokoro-ONNX (Local)
-- **Frontend**: HTMX, TailwindCSS
+- **Backend**: Python 3.14+, FastAPI, uv
+- **LLM**: OpenAI (default `gpt-4o-mini`) or Anthropic (`claude-*`)
+- **ASR**: Parakeet TDT 0.6b v3 via MLX (Apple Silicon only)
+- **VAD**: Silero (pysilero-vad)
+- **TTS**: Kokoro-ONNX (English), Piper (German)
+- **Frontend**: single voice page, vanilla JS + WebAudio
 
 ## 🏃 Quick Start
 
 ### 1. Prerequisites
+- Apple Silicon Mac (Parakeet-MLX).
 - [uv](https://github.com/astral-sh/uv) installed.
-- OpenAI API Key.
+- OpenAI API key (or Anthropic key + `LLM_MODEL=claude-...`).
 
 ### 2. Setup
 Create a `.env` file:
@@ -39,25 +38,29 @@ ALLOW_UNAUTHENTICATED_VOICE=true
 Leave that setting unset outside local development so the voice WebSocket
 continues to require a JWT.
 
-Install dependencies:
+Install dependencies and the Kokoro model files:
 ```bash
 make install
+make download-models
 ```
 
 ### 3. Run
-Start the server:
 ```bash
 make start
 ```
-Access the dashboard at: [http://localhost:8000/api/v1/dashboard](http://localhost:8000/api/v1/dashboard)
+Open https://localhost:8000 (self-signed cert; redirects to the voice page). Tap the orb, talk.
+
+Latency probe without a mic (server must be running):
+```bash
+uv run python scripts/ws_probe.py "Hello, how are you?"
+```
 
 ## 📁 Project Structure
-- `app/api`: FastAPI route handlers (Auth, Ingestion, Voice).
-- `app/services`: Core logic for Speech, TTS, Knowledge, and Orchestration.
-- `app/templates`: HTMX/Jinja2 dashboard templates.
-- `docs/superpowers/tasks/`: Detailed implementation roadmap and status.
+- `app/api`: FastAPI route handlers (auth, voice page, voice WebSocket).
+- `app/speech_input`, `app/dialogue`, `app/synthesis`: the three pipeline parts.
+- `app/orchestrator.py`: wires the parts per session.
+- `docs/superpowers/`: specs, plans, task checklists.
 
 ## 📋 Documentation
-- [System Design](./system-design.md): Deep dive into the architecture.
-- [GEMINI.md](./GEMINI.md): Agent-specific context and conventions.
-- [ESTIMATE.md](./ESTIMATE.md): Project effort and timeline breakdown.
+- [System Design](./docs/system-design.md): architecture.
+- [CLAUDE.md](./CLAUDE.md) / [GEMINI.md](./GEMINI.md): agent context and conventions.

@@ -35,12 +35,7 @@ This document outlines a modular, scalable architecture for building a voice AI 
 ---
 
 ## 4. Knowledge Ingestion & Retrieval
-*   **Document Ingestion / Admin Interface:** Admin users upload files through a dedicated FastAPI endpoint. Files are pre‑processed by a PII/PHI redaction service before ingestion.
-*   **Cognee Ingestion:** Sanitised documents are embedded and stored in Cognee’s graph and vector databases. With access control enabled (`ENABLE_BACKEND_ACCESS_CONTROL=true`), Cognee isolates data per user and dataset.
-*   **Data Storage:** Graph and vector files are saved under `.cognee_system/databases/<user_uuid>/<dataset_uuid>`, ensuring that each user’s memory is private.
-*   **Retrieval:** During a conversation, the dialogue manager calls Cognee’s search API to obtain relevant triples, passages or world‑model facts.
-
-[📋 View Tasks: Knowledge Ingestion](./superpowers/tasks/04-knowledge-ingestion.md)
+*Removed 2026-10-02.* The Cognee graph/vector layer was deleted: retrieval and ingest latency (4–8s / 20–60s) made human-pace dialogue impossible and the stored memory was ~135 chars. A replacement memory strategy is a future decision. Design + evidence: [`superpowers/specs/2026-10-02-remove-graph-layer-pace-design.md`](./superpowers/specs/2026-10-02-remove-graph-layer-pace-design.md).
 
 ---
 
