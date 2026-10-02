@@ -3,7 +3,7 @@
 A modular voice assistant for natural, real-time spoken conversation. All speech models run locally; the LLM is OpenAI or Anthropic.
 
 ## 🚀 Key Features
-- **Real-Time Voice Dialogue**: local ASR (Parakeet-MLX on the Apple GPU), Silero VAD, Kokoro/Piper TTS, streamed segment-by-segment.
+- **Real-Time Voice Dialogue**: local ASR (Parakeet-MLX on the Apple GPU), Silero VAD, Piper TTS (Kokoro optional), streamed segment-by-segment.
 - **Natural turn-taking**: 0.5s end-of-turn, barge-in cuts the assistant mid-sentence.
 - **Pluggable LLM**: OpenAI or Anthropic, selected by `LLM_MODEL`.
 
@@ -14,7 +14,7 @@ No memory/knowledge layer at present — removed 2026-10-02, see `docs/superpowe
 - **LLM**: OpenAI (default `gpt-4o-mini`) or Anthropic (`claude-*`)
 - **ASR**: Parakeet TDT 0.6b v3 via MLX (Apple Silicon only)
 - **VAD**: Silero (pysilero-vad)
-- **TTS**: Kokoro-ONNX (English), Piper (German)
+- **TTS**: Piper (default, EN+DE), Kokoro-ONNX (optional EN, `NOA_TTS_PROVIDER=kokoro`)
 - **Frontend**: single voice page, vanilla JS + WebAudio
 
 ## 🏃 Quick Start
@@ -38,10 +38,9 @@ ALLOW_UNAUTHENTICATED_VOICE=true
 Leave that setting unset outside local development so the voice WebSocket
 continues to require a JWT.
 
-Install dependencies and the Kokoro model files:
+Install dependencies (Piper voices ship in `voices/`; `make download-models` fetches the optional Kokoro model):
 ```bash
 make install
-make download-models
 ```
 
 ### 3. Run

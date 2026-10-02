@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.api.v1 import api_router
 from app.synthesis import SynthesisService
 
-# Process-wide TTS instance: model load is heavy, so warm one Kokoro
+# Process-wide TTS instance: model load is heavy, so warm one TTS
 # graph at boot and reuse it across sessions. Sessions still construct
 # their own SynthesisService, but the orchestrator should hand them
 # this shared instance to skip the per-session cold load.
@@ -21,7 +21,7 @@ shared_tts = SynthesisService()
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
-    # Warm Kokoro so ONNX graphs / kernels are hot before the first user-visible
+    # Warm the TTS so ONNX graphs / kernels are hot before the first user-visible
     # call. This reduces the first-reply latency from ~5s to <1s.
     t0 = time.perf_counter()
     try:

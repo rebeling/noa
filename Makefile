@@ -1,19 +1,19 @@
-.PHONY: start start-fake start-echo start-echo-piper start-http dev-cert install clean help download-models
+.PHONY: start start-fake start-echo start-echo-kokoro start-http dev-cert install clean help download-models
 
 help:
 	@echo "Available commands:"
-	@echo "  make start                - Start over HTTPS, real LLM + Kokoro TTS"
+	@echo "  make start                - Start over HTTPS, real LLM + TTS (Piper default)"
 	@echo "  make start-fake           - fake-reply (debug) mode, no LLM/TTS"
-	@echo "  make start-echo           - echo mode + Kokoro TTS (default)"
-	@echo "  make start-echo-piper     - echo mode + Piper TTS"
-	@echo "  make - echo mode + StyleTTS2"
+	@echo "  make start-echo           - echo mode + Piper TTS"
+	@echo "  make start-echo-kokoro    - echo mode + Kokoro TTS (slower, richer voice)"
 	@echo "  make start-http           - plain HTTP, fake reply (localhost only)"
 	@echo "  make dev-cert             - Generate a self-signed dev certificate"
 	@echo "  make install              - Install dependencies using uv"
+	@echo "  make download-models      - Fetch the optional Kokoro model files"
 	@echo "  make clean                - Remove temporary files and caches"
 	@echo ""
 	@echo "Reply mode: NOA_REPLY_MODE=fake|echo|real      (default fake)"
-	@echo "TTS prov:   NOA_TTS_PROVIDER=kokoro|piper  (default kokoro)"
+	@echo "TTS prov:   NOA_TTS_PROVIDER=piper|kokoro  (default piper)"
 
 start: dev-cert
 	@echo "Open: https://localhost:8000  (reply_mode=real)"
@@ -26,13 +26,13 @@ start-fake: dev-cert
 		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
 
 start-echo: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=kokoro)"
-	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=kokoro uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=piper)"
+	NOA_REPLY_MODE=echo uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
 		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
 
-start-echo-piper: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=piper voice=$${NOA_PIPER_VOICE:-jenny})"
-	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=piper uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+start-echo-kokoro: dev-cert
+	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=kokoro)"
+	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=kokoro uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
 		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
 
 start-http:

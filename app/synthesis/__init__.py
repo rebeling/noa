@@ -1,7 +1,8 @@
 """Synthesis part — text-to-speech.
 
 Public surface: SynthesisService. The English provider is selected at
-runtime via `NOA_TTS_PROVIDER=kokoro|piper` (default: kokoro).
+runtime via `NOA_TTS_PROVIDER=piper|kokoro` (default: piper — ~10x
+faster first chunk than Kokoro on CPU, 50-170ms vs 600-1300ms).
 German always uses Piper (Kokoro v1.0 ships no German voice), via a
 German voice file configured by `NOA_PIPER_DE_VOICE`.
 
@@ -33,7 +34,7 @@ def postprocess_for_speech(text: str) -> str:
     return _impl(text)
 
 
-_PROVIDER = os.environ.get("NOA_TTS_PROVIDER", "kokoro").lower()
+_PROVIDER = os.environ.get("NOA_TTS_PROVIDER", "piper").lower()
 # Kokoro v1.0 has no German voice, so German always goes through Piper.
 _DE_PIPER_VOICE = os.environ.get(
     "NOA_PIPER_DE_VOICE", "voices/de_DE-thorsten-medium.onnx"
@@ -59,7 +60,7 @@ class SynthesisService:
 
     def _build_provider(self, language: str):
         """Construct the TTS provider for `language`. English honors
-        NOA_TTS_PROVIDER (default Kokoro); German uses Piper with a
+        NOA_TTS_PROVIDER (default Piper); German uses Piper with a
         German voice. Falls back to Kokoro if a provider can't init."""
         if language == "de":
             from app.synthesis._piper import PiperTTS
