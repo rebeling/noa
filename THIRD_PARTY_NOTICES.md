@@ -1,56 +1,38 @@
 # Third-Party Notices
 
-This project depends on third-party open-source software. The list below covers
-the direct runtime dependencies and browser assets currently referenced by this
-repository. Transitive dependencies should be audited from the lockfile before
-shipping a packaged application, container image, or binary distribution.
+Noa is MIT licensed. It depends on the following software and models.
+Check the lockfile for transitive dependencies before redistributing.
 
-This notice file is informational and does not replace the original license
-texts from each project.
-
-## Python Dependencies
+## Python dependencies
 
 | Component | License | Use |
 | --- | --- | --- |
-| bcrypt | Apache-2.0 | Password hashing |
-| cognee | Apache-2.0 | Knowledge graph and memory |
-| fastapi | MIT | HTTP and WebSocket API framework |
-| faster-whisper | MIT | Speech-to-text inference |
-| jinja2 | BSD | HTML templating |
-| kokoro-onnx | MIT | Text-to-speech wrapper |
-| openai | Apache-2.0 | OpenAI API client |
-| pipecat-ai | BSD-2-Clause | Voice and multimodal pipeline framework |
-| presidio-analyzer | MIT | PII/PHI detection |
-| presidio-anonymizer | MIT | PII/PHI anonymization |
-| pydantic-settings | MIT | Application settings |
-| python-jose | MIT | JWT encoding and decoding |
-| python-multipart | Apache-2.0 | Multipart form parsing |
-| soundfile | BSD-3-Clause | Audio file handling |
-| torch | BSD-style / BSD-3-Clause | Tensor and ML runtime |
-| torchaudio | BSD-style / BSD-3-Clause | Audio ML utilities |
+| fastapi | MIT | HTTP and WebSocket API |
 | uvicorn | BSD-3-Clause | ASGI server |
+| jinja2 | BSD-3-Clause | HTML templating |
+| pydantic-settings | MIT | Settings |
+| python-jose | MIT | JWT encoding and decoding |
+| python-multipart | Apache-2.0 | Login form parsing |
+| bcrypt | Apache-2.0 | Password hashing |
+| openai | Apache-2.0 | OpenAI API client |
+| anthropic | MIT | Anthropic API client |
+| pysilero-vad | MIT | Voice activity detection |
+| parakeet-mlx | Apache-2.0 | ASR inference on Apple Silicon |
+| piper-tts | MIT | Text-to-speech |
+| kokoro-onnx | MIT | Optional text-to-speech |
+| soundfile | BSD-3-Clause | WAV encoding for Kokoro |
 
-## Browser Assets
+## Models
 
-| Component | License | Use |
+| Model | License | Notes |
 | --- | --- | --- |
-| htmx | BSD-2-Clause | HTML-driven browser interactions |
-| Tailwind CSS | MIT | Utility CSS framework |
-| Fraunces font | SIL Open Font License 1.1 | UI font |
-| Space Mono font | SIL Open Font License 1.1 | UI font |
+| Silero VAD | MIT | bundled with pysilero-vad |
+| Parakeet TDT 0.6b v3 (`mlx-community/parakeet-tdt-0.6b-v3`) | CC-BY-4.0 | downloaded from Hugging Face on first use |
+| Piper voices `en_GB-jenny_dioco`, `de_DE-thorsten` | MIT (Piper); voice datasets carry their own terms, see each `.onnx.json` | downloaded by `make voices` |
+| Kokoro v1.0 | Apache-2.0 | optional, downloaded by `make kokoro` |
 
-## Model And Native Library Notes
+## Browser assets
 
-- `kokoro-onnx` is MIT licensed, while Kokoro model files may carry separate
-  model licenses. Keep model license files with any redistributed model weights.
-- `soundfile` uses `libsndfile`; if you bundle native `libsndfile` binaries,
-  include the applicable `libsndfile` license notices and comply with its terms.
-
-## Distribution Checklist
-
-Before distributing this project outside local development:
-
-1. Generate a complete license report from the resolved environment or lockfile.
-2. Include original license texts for bundled dependencies and assets.
-3. Include separate notices for model weights and native libraries.
-4. Re-check licenses after dependency upgrades.
+| Component | License |
+| --- | --- |
+| Tailwind CSS (CDN) | MIT |

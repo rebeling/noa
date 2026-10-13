@@ -24,21 +24,12 @@ async def voice_websocket(
         return
 
     await websocket.accept()
-    state = websocket.app.state
-    shared_tts = getattr(state, "shared_tts", None)
-    # No fixed greeting: the orchestrator picks a random greeting per
-    # session in the session language.
+    shared_tts = getattr(websocket.app.state, "shared_tts", None)
     orchestrator = DialogueOrchestrator(shared_tts=shared_tts)
-    # sub identifies the user for logging. Falls back to "anonymous" only
-    # if the token somehow lacks a subject (decode already rejects
-    # sub=None, so this is belt-and-suspenders).
-    user_id = payload.sub or "anonymous"
-    # role is carried for future RBAC; nothing in the voice path is
-    # role-gated today (the memory layer that was is gone).
-    role = payload.role or "customer"
+    # sub and role are logged only; nothing in the voice path is role-gated.
     try:
         await orchestrator.run_session(
-            websocket, language=lang, user_id=user_id, role=role)
+            websocket, language=lang, user_id=payload.sub, role=payload.role)
     except WebSocketDisconnect:
         print("Client disconnected")
     except Exception as e:

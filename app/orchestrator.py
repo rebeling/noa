@@ -14,13 +14,7 @@ import time
 from fastapi import WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from app.contracts import (
-    AudioChunk,
-    FinalTranscript,
-    PartialTranscript,
-    SpeechStarted,
-    TurnEnded,
-)
+from app.contracts import AudioChunk, PartialTranscript, SpeechStarted, TurnEnded
 from app.bus import EventBus
 from app.dialogue import DialogueService
 from app.speech_input import SpeechInputService
@@ -29,8 +23,7 @@ from app import _turn_text as turn_text
 
 # How often the background partial-transcribe loop runs. 0.25s keeps
 # partials snappy; Parakeet decodes a window in ~150-500ms on the Apple
-# GPU so the loop stays ahead. (Whisper fallback is slower but still
-# tractable since the window is capped below.)
+# GPU so the loop stays ahead.
 _PARTIAL_POLL_SECS = 0.25
 # Below this many bytes of buffered audio, skip a partial transcribe.
 # 4000 bytes = ~0.125s — surfaces first text sooner than the old 0.25s.
@@ -59,8 +52,7 @@ _ECHO_LLM_MAX_SECS = 2.5
 #   'fake' — timed stub, no LLM, no TTS (offline plumbing test)
 #   'echo' — mock LLM (1.0–2.5s delay, echoes input), real TTS
 #   'real' — real LLM + real TTS
-_REPLY_MODE = os.environ.get("NOA_REPLY_MODE", "fake").lower()
-
+_REPLY_MODE = os.environ.get("NOA_REPLY_MODE", "real").lower()
 
 
 def _is_open(ws) -> bool:
@@ -87,7 +79,7 @@ class DialogueOrchestrator:
     """Builds the pipeline for one WebSocket session and runs it.
 
     `shared_tts` lets the API layer pass in a process-wide, pre-warmed
-    SynthesisService so each new session skips Kokoro cold-load. Falls
+    SynthesisService so each new session skips the TTS cold load. Falls
     back to a fresh per-session instance if none is provided."""
 
     def __init__(self, shared_tts: SynthesisService | None = None) -> None:
@@ -98,7 +90,6 @@ class DialogueOrchestrator:
         websocket,
         language: str = "en",
         user_id: str = "anonymous",
-        dataset_name: str = "default",
         role: str = "customer",
     ) -> None:
         bus = EventBus()
@@ -115,12 +106,10 @@ class DialogueOrchestrator:
             synthesis = SynthesisService(language=language)
             using_shared = False
         print(f"session: reply_mode={_REPLY_MODE} language={language} "
-              f"user_id={user_id} role={role} dataset={dataset_name} "
-              f"shared_tts={using_shared}")
+              f"user_id={user_id} role={role} shared_tts={using_shared}")
         # session language is mutable via set_language; capture in a holder
         # the closures read so a mid-session switch reaches the greeting pool.
         session_lang = language
-
 
         # --- event handlers: parts never call each other directly ---
         async def on_partial(event: PartialTranscript) -> None:
@@ -248,8 +237,7 @@ class DialogueOrchestrator:
                             {"type": "status", "text": "Speaking..."}))
                     await _safe_send_text(websocket, json.dumps(
                         {"type": "response_chunk", "text": sentence + " "}))
-                    tts_text = turn_text.apply_tts_pronunciation(clean)
-                    async for audio_chunk in synthesis.synthesize_stream(tts_text):
+                    async for audio_chunk in synthesis.synthesize_stream(clean):
                         if chunks == 0:
                             now = time.perf_counter()
                             print(f"[trace] tts first_chunk: "
@@ -313,7 +301,6 @@ class DialogueOrchestrator:
                 await _safe_send_text(websocket, json.dumps(
                     {"type": "status", "text": "Waiting..."}))
 
-
         bus.subscribe(PartialTranscript, on_partial)
         bus.subscribe(SpeechStarted, on_speech_started)
         bus.subscribe(TurnEnded, on_turn_ended)
@@ -337,11 +324,11 @@ class DialogueOrchestrator:
         turn_end_t0: float | None = None
 
         async def partial_loop() -> None:
-            """Transcribe the whole growing buffer each poll. Whisper
+            """Transcribe the live window of the buffer each poll. The ASR
             re-sees earlier audio with later context, so partials self-
-            correct ("I scream" -> "ice cream") on each pass. Cost grows
-            with turn length; vad_filter=True inside ASR strips internal
-            silence to keep it tractable for typical short turns."""
+            correct ("I scream" -> "ice cream") on each pass. The window is
+            capped and slid (see constants above) so decode time stays
+            bounded on long turns."""
             nonlocal last_partial, last_partial_at, last_partial_buflen
             nonlocal committed_text, commit_offset
             try:
@@ -398,15 +385,9 @@ class DialogueOrchestrator:
             except Exception as e:  # noqa: BLE001
                 print(f"partial loop error: {e}")
 
-        # --- receive loop ---
-        # Greet the user once on session start so they know the
-        # pipeline is hot. Uses the pre-rendered WAV from app boot
-        # when available so the audio arrives instantly.
+        # Greet once on session start so the user knows the pipeline is hot.
         async def _greet() -> None:
-            # Random greeting per session, in the session language —
-            # synthesized on demand (no fixed cached phrase).
-            pool = turn_text.GREETINGS.get(session_lang, turn_text.GREETINGS["en"])
-            phrase = random.choice(pool)
+            phrase = turn_text.greeting(session_lang)
             print(f"[greet] mode={_REPLY_MODE} lang={session_lang} "
                   f"phrase={phrase!r}")
             if _REPLY_MODE == "fake":
@@ -443,9 +424,8 @@ class DialogueOrchestrator:
         except Exception as e:  # noqa: BLE001
             print(f"greet failed: {e}")
 
-        # Accepts both binary frames (PCM audio) and text frames (JSON
-        # control messages). Only set_language is handled today; other
-        # control types are ignored so the receive path stays simple.
+        # Receive loop: binary frames are PCM audio, text frames are JSON
+        # control messages (set_language, barge_in, text_input).
         while True:
             try:
                 message = await websocket.receive()
@@ -476,16 +456,15 @@ class DialogueOrchestrator:
                                     synthesis.set_language(lang)
                                 print(f"language switched to {lang}")
                         elif ctype == "barge_in":
-                            # Cancel a pending fake-LLM reply so the user
-                            # can speak again immediately.
+                            # Cancel the in-flight reply so the user can
+                            # speak again immediately.
                             if pending_reply is not None and not pending_reply.done():
                                 pending_reply.cancel()
                                 pending_reply = None
                                 print("barge_in: cancelled pending reply")
                         elif ctype == "text_input":
-                            # Typed message: skip ASR/VAD entirely and drive
-                            # the same reply path as a finished spoken turn.
-                            # Lets us test retrieval + LLM without the mic.
+                            # Typed message: skip VAD/ASR and drive the same
+                            # reply path as a finished spoken turn.
                             typed = str(ctrl.get("text", "")).strip()
                             if typed:
                                 print(f"[text_input] {typed!r}")
@@ -573,7 +552,6 @@ class DialogueOrchestrator:
                               f"audio={len(final_audio)/32000:.2f}s "
                               f"(reuse=no fits={fits_window} "
                               f"covered={covered} age={age*1000:.0f}ms)")
-                    await bus.publish(FinalTranscript(text=text))
                     await bus.publish(TurnEnded(transcript=text))
                     audio_buffer.clear()
                     last_partial = ""
@@ -594,5 +572,3 @@ class DialogueOrchestrator:
                 traceback.print_exc()
                 break
 
-
-orchestrator = DialogueOrchestrator()

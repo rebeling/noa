@@ -1,8 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-{# Dev-only JWT minted by views.voice_page — read by the WebSocket connect JS.
-   Not production auth; see docs/superpowers/specs/2026-05-22-voice-ws-dev-token-design.md #}
+{# Dev-only JWT minted by views.voice_page — read by the WebSocket connect JS. #}
 <meta name="ws-token" content="{{ ws_token }}">
 <link rel="stylesheet" href="/static/voice.css">
 
@@ -33,8 +32,8 @@
       <select id="role-input"
               style="background:rgba(255,255,255,0.06);border:1px solid rgba(160,180,200,0.3);
                      color:#e6eef5;border-radius:4px;padding:3px 6px;font-size:12px;">
-        <option value="admin" {% if current_role == 'admin' %}selected{% endif %}>admin (ingest)</option>
-        <option value="customer" {% if current_role == 'customer' %}selected{% endif %}>customer (query only)</option>
+        <option value="admin" {% if current_role == 'admin' %}selected{% endif %}>admin</option>
+        <option value="customer" {% if current_role == 'customer' %}selected{% endif %}>customer</option>
       </select>
       <button class="debug-btn" onclick="switchUser()">Switch</button>
     </div>

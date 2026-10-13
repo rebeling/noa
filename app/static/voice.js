@@ -33,7 +33,7 @@
   const MOCK_PHRASES = [
     "Hello!",
     "I'm listening.",
-    "Could you tell me more about that? I'm particularly interested in how the knowledge graph integration handles real-time updates without blocking the primary dialogue thread.",
+    "Could you tell me more about that? I'm particularly interested in how the turn-taking handles interruptions without dropping what you said.",
     "That sounds interesting.",
     "Yes, I can help with that. What specifically do you need?",
     "Noa is a privacy-first assistant designed to run on local hardware whenever possible, ensuring your data stays yours while providing high-quality voice interactions and intelligent response synthesis.",

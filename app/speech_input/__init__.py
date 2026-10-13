@@ -1,12 +1,12 @@
 """Speech input part — VAD + turn detection + ASR.
 
-Public surface: SpeechInputService. Internals (_vad, _asr, _turn) are
-private. No other pipeline part imports this package's internals.
+Public surface: SpeechInputService. Internals (_silero, _vad, _turn,
+_parakeet) are private.
 
-Lazy loading: the heavy ASR import (parakeet_mlx) is deferred to
-first transcribe() call, so `import app.speech_input` stays cheap and
-the server boots fast. AmplitudeVAD and TurnDetector are light and
-import at module scope; SileroVAD loads its model inside _build_vad.
+Lazy loading: the heavy ASR import (parakeet_mlx) is deferred to the
+first transcribe() call, so `import app.speech_input` stays cheap and the
+server boots fast. Silero loads its small model when the service is built;
+set NOA_VAD=amplitude for a model-free fallback.
 """
 
 import os

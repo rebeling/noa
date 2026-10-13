@@ -1,15 +1,10 @@
-"""Shared persona prompt + LLM request logging.
-
-Internal to dialogue. Both LLM providers (_llm.py OpenAI, _claude.py
-Anthropic) build the same persona system prompt and log requests the same
-way, so it lives here rather than in either provider.
-"""
+"""Persona prompt and request logging shared by both LLM providers."""
 
 from datetime import date
 
 _PERSONA_NAME = "Noa"
-# Map a session language code to the name used in the prompt directive.
 _LANG_NAMES = {"de": "German", "en": "English"}
+
 
 def system_prompt(language: str) -> str:
     lang_name = _LANG_NAMES.get(language, "English")
@@ -39,19 +34,11 @@ Follow these rules strictly:
 """
 
 
-def log_llm_request(messages: list[dict], context: str | None) -> None:
-    """Dump exactly what goes to the LLM: whether retrieval injected memory
-    context, its size, and the full message stack. The single source of truth
-    for "did the graph/vector lookup actually reach the model?"."""
-    n = len(context) if context else 0
-    print(f"[llm] context={'HIT' if context else 'NONE'} chars={n} "
-          f"msgs={len(messages)}")
-    if context:
-        print(f"[llm]   context>>> {context!r}")
+def log_llm_request(messages: list[dict]) -> None:
+    """Print the full message stack sent to the LLM, bodies trimmed to 600 chars."""
+    print(f"[llm] msgs={len(messages)}")
     for m in messages:
-        body = m.get("content", "")
-        if not isinstance(body, str):
-            body = str(body)
+        body = str(m.get("content", ""))
         if len(body) > 600:
             body = body[:600] + f"...(+{len(body) - 600} chars)"
         print(f"[llm]   [{m.get('role')}] {body}")

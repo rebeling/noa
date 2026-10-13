@@ -1,4 +1,4 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
 build/
@@ -6,21 +6,22 @@ dist/
 wheels/
 *.egg-info
 .ruff_cache
-
-# Virtual environments
 .venv
-voices-v1.0.bin
-kokoro-v1.0.onnx
-*.onnx
-.env
 
-# Local development TLS certificate — never commit
+# Models and voices (downloaded by `make install` / `make kokoro`)
+*.onnx
+*.onnx.json
+voices-v1.0.bin
+
+# Secrets and local TLS certificate
+.env
 certs/
 
+# OS / editor
+.DS_Store
+
+# AI assistant context files
 .claude
 CLAUDE.md
 AGENTS.md
 GEMINI.md
-voices/en_GB-jenny_dioco-medium.onnx.json
-voices/en_US-lessac-medium.onnx.json
-voices/de_DE-thorsten-medium.onnx.json

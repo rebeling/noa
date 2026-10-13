@@ -1,42 +1,53 @@
-.PHONY: start start-fake start-echo start-echo-kokoro start-http dev-cert install clean help download-models
+.PHONY: help install voices kokoro start start-fake start-echo start-http dev-cert test clean
+
+PIPER_URL = https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0
+UVICORN   = uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+TLS       = --ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
 
 help:
-	@echo "Available commands:"
-	@echo "  make start                - Start over HTTPS, real LLM + TTS (Piper default)"
-	@echo "  make start-fake           - fake-reply (debug) mode, no LLM/TTS"
-	@echo "  make start-echo           - echo mode + Piper TTS"
-	@echo "  make start-echo-kokoro    - echo mode + Kokoro TTS (slower, richer voice)"
-	@echo "  make start-http           - plain HTTP, fake reply (localhost only)"
-	@echo "  make dev-cert             - Generate a self-signed dev certificate"
-	@echo "  make install              - Install dependencies using uv"
-	@echo "  make download-models      - Fetch the optional Kokoro model files"
-	@echo "  make clean                - Remove temporary files and caches"
-	@echo ""
-	@echo "Reply mode: NOA_REPLY_MODE=fake|echo|real      (default fake)"
-	@echo "TTS prov:   NOA_TTS_PROVIDER=piper|kokoro  (default piper)"
+	@echo "  make install     - install Python deps and download Piper voices"
+	@echo "  make start       - run over HTTPS with real LLM + TTS"
+	@echo "  make start-fake  - run with timed stub replies (no LLM, no TTS)"
+	@echo "  make start-echo  - run with echoed replies + real TTS (no LLM)"
+	@echo "  make start-http  - plain HTTP, fake replies (localhost only, mic needs HTTPS elsewhere)"
+	@echo "  make kokoro      - download the optional Kokoro TTS model"
+	@echo "  make test        - run the unit tests"
+	@echo "  make clean       - remove .venv and caches"
+
+install: voices
+	uv sync
+
+# Piper voices: English (Jenny, GB) and German (Thorsten). ~60MB each.
+voices:
+	@mkdir -p voices
+	@for v in en/en_GB/jenny_dioco/medium/en_GB-jenny_dioco-medium de/de_DE/thorsten/medium/de_DE-thorsten-medium; do \
+		f=voices/$$(basename $$v); \
+		if [ ! -f $$f.onnx ]; then \
+			echo "downloading $$f.onnx"; \
+			curl -sL -o $$f.onnx $(PIPER_URL)/$$v.onnx; \
+			curl -sL -o $$f.onnx.json $(PIPER_URL)/$$v.onnx.json; \
+		fi; \
+	done
+
+kokoro:
+	curl -L -o kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+	curl -L -o voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 
 start: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=real)"
-	NOA_REPLY_MODE=real uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
-		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
+	@echo "Open: https://localhost:8000"
+	NOA_REPLY_MODE=real $(UVICORN) $(TLS)
 
 start-fake: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=fake)"
-	NOA_REPLY_MODE=fake uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
-		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
+	@echo "Open: https://localhost:8000  (fake replies)"
+	NOA_REPLY_MODE=fake $(UVICORN) $(TLS)
 
 start-echo: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=piper)"
-	NOA_REPLY_MODE=echo uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
-		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
-
-start-echo-kokoro: dev-cert
-	@echo "Open: https://localhost:8000  (reply_mode=echo, tts=kokoro)"
-	NOA_REPLY_MODE=echo NOA_TTS_PROVIDER=kokoro uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
-		--ssl-keyfile certs/dev-key.pem --ssl-certfile certs/dev-cert.pem
+	@echo "Open: https://localhost:8000  (echo replies)"
+	NOA_REPLY_MODE=echo $(UVICORN) $(TLS)
 
 start-http:
-	NOA_REPLY_MODE=fake uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	@echo "Open: http://localhost:8000  (fake replies)"
+	NOA_REPLY_MODE=fake $(UVICORN)
 
 dev-cert:
 	@mkdir -p certs
@@ -46,19 +57,11 @@ dev-cert:
 			-days 365 -subj "/CN=localhost" \
 			-addext "subjectAltName=DNS:localhost,IP:127.0.0.1" ; \
 		echo "Self-signed dev cert created in certs/" ; \
-	else \
-		echo "certs/dev-cert.pem already exists" ; \
 	fi
 
-install:
-	uv sync
-
-download-models:
-	@echo "Downloading Kokoro v1.0 models (Standard)..."
-	curl -L -o kokoro-v1.0.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
-	curl -L -o voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+test:
+	uv run python -m unittest discover -s tests
 
 clean:
 	rm -rf .venv
 	find . -type d -name "__pycache__" -exec rm -rf {} +
-	rm -f temp_*.txt ingest_*.txt

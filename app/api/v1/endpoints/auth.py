@@ -1,9 +1,8 @@
 """Authentication endpoint.
 
-Phase 1 has no database. Instead of a hardcoded admin/admin bypass, the
-single bootstrap admin is loaded from environment variables holding a
-*bcrypt hash* of the password — the plaintext password never lives in
-code or config. If the env vars are unset, login fails closed.
+There is no database. The single bootstrap admin is loaded from environment
+variables holding a *bcrypt hash* of the password — the plaintext password
+never lives in code or config. If the env vars are unset, login fails closed.
 
 Seed a hash with:
     uv run python -c "from app.core.security import get_password_hash; \

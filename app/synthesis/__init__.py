@@ -1,122 +1,58 @@
 """Synthesis part — text-to-speech.
 
-Public surface: SynthesisService. The English provider is selected at
-runtime via `NOA_TTS_PROVIDER=piper|kokoro` (default: piper — ~10x
-faster first chunk than Kokoro on CPU, 50-170ms vs 600-1300ms).
-German always uses Piper (Kokoro v1.0 ships no German voice), via a
-German voice file configured by `NOA_PIPER_DE_VOICE`.
+Public surface: SynthesisService and postprocess_for_speech.
 
-Language-aware: the service keeps one provider per language and picks
-the active one from the session language (set at construction and
-switchable mid-session via set_language). Each provider is in its own
-underscore-private module and shares the TTSProvider contract.
-
-Lazy loading: heavy imports (kokoro_onnx, piper) are
-deferred to the first synth/warmup call so `import app.synthesis`
-stays cheap regardless of which provider is selected.
+English uses the provider named by `NOA_TTS_PROVIDER` (`piper`, the
+default, or `kokoro`). German always uses Piper, since Kokoro ships no
+German voice. One provider per language is built lazily on first use, so
+heavy imports (piper, kokoro_onnx) never run at import time.
 """
 
 import os
 from collections.abc import AsyncGenerator
 
+from app.contracts import TTSProvider
+from app.synthesis._postprocess import postprocess_for_speech
+
 __all__ = ["SynthesisService", "postprocess_for_speech"]
 
-
-def postprocess_for_speech(text: str) -> str:
-    """Make an LLM reply safe and tight to speak aloud (strip markdown,
-    neutralize URLs/links, drop control chars, collapse whitespace, cap
-    length at a sentence boundary). Pure deterministic string work — no
-    model call. Run on the full reply between the LLM and TTS; streaming
-    is unaffected since the cleaned string is still chunked by
-    synthesize_stream. See app.synthesis._postprocess."""
-    from app.synthesis._postprocess import postprocess_for_speech as _impl
-
-    return _impl(text)
-
-
 _PROVIDER = os.environ.get("NOA_TTS_PROVIDER", "piper").lower()
-# Kokoro v1.0 has no German voice, so German always goes through Piper.
-_DE_PIPER_VOICE = os.environ.get(
-    "NOA_PIPER_DE_VOICE", "voices/de_DE-thorsten-medium.onnx"
-)
+_DE_PIPER_VOICE = os.environ.get("NOA_PIPER_DE_VOICE", "voices/de_DE-thorsten-medium.onnx")
+_LANGS = ("en", "de")
+
+
+def _build_provider(language: str) -> TTSProvider:
+    if language == "en" and _PROVIDER == "kokoro":
+        from app.synthesis._kokoro import KokoroTTS
+
+        tts: TTSProvider = KokoroTTS()
+    else:
+        from app.synthesis._piper import PiperTTS
+
+        tts = PiperTTS(_DE_PIPER_VOICE) if language == "de" else PiperTTS()
+    print(f"[tts] {language} provider={type(tts).__name__} ready={tts.is_ready()}")
+    return tts
 
 
 class SynthesisService:
-    """Owns one TTS provider per language and renders with the active
-    one. The English provider follows NOA_TTS_PROVIDER; German uses
-    Piper. Providers load lazily on first use for their language, so a
-    session that never speaks German never loads the German model."""
+    """Renders speech with the provider for the active session language."""
 
     def __init__(self, language: str = "en") -> None:
-        # provider instances keyed by language code, built lazily
-        self._providers: dict[str, object] = {}
-        self._language = language if language in ("en", "de") else "en"
+        self._providers: dict[str, TTSProvider] = {}
+        self._language = language if language in _LANGS else "en"
 
     def set_language(self, language: str) -> None:
-        """Switch the active synthesis language. The provider for the new
-        language is built on its next use, not here."""
-        if language in ("en", "de"):
+        if language in _LANGS:
             self._language = language
 
-    def _build_provider(self, language: str):
-        """Construct the TTS provider for `language`. English honors
-        NOA_TTS_PROVIDER (default Piper); German uses Piper with a
-        German voice. Falls back to Kokoro if a provider can't init."""
-        if language == "de":
-            from app.synthesis._piper import PiperTTS
-
-            candidate = PiperTTS(_DE_PIPER_VOICE)
-            if candidate.is_ready():
-                print(f"[tts] de provider=piper voice={_DE_PIPER_VOICE}")
-                return candidate
-            print("[tts] de Piper not ready, falling back to kokoro (no German voice)")
-            from app.synthesis._kokoro import KokoroTTS
-
-            return KokoroTTS()
-        # English (or anything else): the configured provider.
-        name = _PROVIDER
-        print(f"[tts] en requested provider={name}")
-        candidate = None
-        if name == "piper":
-            from app.synthesis._piper import PiperTTS
-            candidate = PiperTTS()
-        elif name == "kokoro":
-            from app.synthesis._kokoro import KokoroTTS
-            candidate = KokoroTTS()
-        else:
-            print(f"[tts] unknown provider '{name}', using kokoro")
-        if candidate is not None and candidate.is_ready():
-            print(f"[tts] en using provider={name}")
-            return candidate
-        if name != "kokoro":
-            print(f"[tts] provider={name} not ready, falling back to kokoro")
-        from app.synthesis._kokoro import KokoroTTS
-        return KokoroTTS()
-
-    def _get_tts(self, language: str | None = None):
-        """Return the provider for `language` (defaults to the active
-        session language), building it on first use."""
-        lang = language or self._language
-        if lang not in ("en", "de"):
-            lang = "en"
-        if lang not in self._providers:
-            self._providers[lang] = self._build_provider(lang)
-        return self._providers[lang]
+    def _get_tts(self) -> TTSProvider:
+        if self._language not in self._providers:
+            self._providers[self._language] = _build_provider(self._language)
+        return self._providers[self._language]
 
     def warmup(self) -> None:
-        """Warm the active language's provider. Safe to call repeatedly."""
         self._get_tts().warmup()
 
-    def precache(self, text: str) -> bytes:
-        """Synth `text` once with the active provider, return WAV."""
-        return self._get_tts().precache(text)
-
-    def synthesize(self, text: str) -> bytes:
-        """Render `text` with the active language's provider. Returns
-        empty bytes if TTS failed to init."""
-        return self._get_tts().synthesize(text)
-
     async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
-        """Stream WAV chunks from the active language's provider."""
         async for chunk in self._get_tts().synthesize_stream(text):
             yield chunk

@@ -21,11 +21,10 @@ def _safe_user(raw: str) -> str:
 
 @router.get("/voice", response_class=HTMLResponse)
 async def voice_page(request: Request, user: str = "dev", role: str = "admin"):
-    # Dev-only: mint a JWT and inject it so the voice WebSocket can
-    # authenticate without a login UI. Not production auth — see
-    # docs/superpowers/specs/2026-05-22-voice-ws-dev-token-design.md
+    # Dev-only: mint a JWT and inject it into the page so the voice
+    # WebSocket can authenticate without a login UI. Not production auth.
     # `user` (?user=) becomes the JWT subject; `role` (?role=) is carried in
-    # the token for future RBAC but gates nothing in the voice path today.
+    # the token but gates nothing in the voice path today.
     current_user = _safe_user(user)
     current_role = role.lower() if role.lower() in ("admin", "customer") else "admin"
     ws_token = create_access_token(subject=current_user, role=current_role)

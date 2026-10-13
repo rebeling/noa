@@ -1,11 +1,7 @@
-"""Piper TTS — fast CPU-only ONNX TTS.
+"""Piper TTS — fast CPU ONNX voices. Internal to synthesis.
 
-Install: `uv add piper-tts` (or `piper-onnx`). Models are downloaded
-separately from https://github.com/rhasspy/piper/releases — voice
-files are <60MB each, much smaller than Kokoro.
-
-Streams audio per phrase. On typical CPU hardware Piper produces
-first audio in 200–500ms for short replies, vs Kokoro's 2–6s.
+Voice files (.onnx + .onnx.json) live in `voices/`; `make voices` fetches
+them. Piper renders a short reply in 50–200ms on a laptop CPU.
 """
 
 import asyncio
@@ -18,17 +14,10 @@ from pathlib import Path
 
 from app.contracts import TTSProvider
 
-
-# Voice file picked via NOA_PIPER_VOICE env var; default to Jenny (GB).
-# Drop any compatible Piper voice .onnx + .onnx.json pair into voices/
-# and reference by basename or relative path.
-_DEFAULT_MODEL = os.environ.get(
-    "NOA_PIPER_VOICE", "voices/en_GB-jenny_dioco-medium.onnx"
-)
+_DEFAULT_VOICE = os.environ.get("NOA_PIPER_VOICE", "voices/en_GB-jenny_dioco-medium.onnx")
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
-    """Wrap raw int16 PCM bytes in a WAV container."""
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as w:
         w.setnchannels(1)
@@ -39,27 +28,22 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
 
 
 class PiperTTS(TTSProvider):
-    def __init__(self, model_path: str = _DEFAULT_MODEL) -> None:
-        self._model_path = model_path
+    def __init__(self, model_path: str = _DEFAULT_VOICE) -> None:
         self._piper = None
-        self._sample_rate = 22050  # default; replaced after load
+        self._sample_rate = 22050
+        if not Path(model_path).exists():
+            print(f"[tts] Piper voice missing: {model_path} — run `make voices`")
+            return
         t0 = time.perf_counter()
         try:
-            # Piper's Python binding API varies by version. Try the
-            # most common shape: `from piper import PiperVoice`.
             from piper.voice import PiperVoice
-            if not Path(model_path).exists():
-                print(f"Piper model missing: {model_path}. "
-                      f"Download from https://github.com/rhasspy/piper/releases")
-                return
+
             self._piper = PiperVoice.load(model_path)
             self._sample_rate = self._piper.config.sample_rate
             print(f"[tts init] Piper loaded in {(time.perf_counter()-t0)*1000:.0f}ms "
                   f"model={model_path} sr={self._sample_rate}")
-        except ImportError:
-            print("Piper not installed. Run: uv add piper-tts")
         except Exception as e:  # noqa: BLE001
-            print(f"Piper init failed: {e}")
+            print(f"[tts] Piper init failed: {e}")
 
     def is_ready(self) -> bool:
         return self._piper is not None
@@ -68,53 +52,18 @@ class PiperTTS(TTSProvider):
         if not self._piper:
             return
         t0 = time.perf_counter()
-        try:
-            list(self._piper.synthesize("hi."))
-            print(f"[tts warmup] {(time.perf_counter()-t0)*1000:.0f}ms")
-        except Exception as e:  # noqa: BLE001
-            print(f"[tts warmup] failed: {e}")
-
-    def _synth_wav(self, text: str) -> bytes:
-        if not self._piper or not text:
-            return b""
-        # New piper API: synthesize() yields AudioChunk objects with
-        # raw int16 PCM bytes. Concatenate and wrap in one WAV.
-        pcm = b"".join(c.audio_int16_bytes for c in self._piper.synthesize(text))
-        return _pcm_to_wav(pcm, self._sample_rate)
-
-    def precache(self, text: str) -> bytes:
-        t0 = time.perf_counter()
-        wav = self._synth_wav(text)
-        print(f"[tts precache] {(time.perf_counter()-t0)*1000:.0f}ms "
-              f"chars={len(text)} bytes={len(wav)}")
-        return wav
-
-    def synthesize(self, text: str) -> bytes:
-        t0 = time.perf_counter()
-        wav = self._synth_wav(text)
-        print(f"[tts one-shot] {(time.perf_counter()-t0)*1000:.0f}ms "
-              f"chars={len(text)} bytes={len(wav)}")
-        return wav
+        list(self._piper.synthesize("hi."))
+        print(f"[tts warmup] {(time.perf_counter()-t0)*1000:.0f}ms")
 
     async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
-        """Stream WAV chunks. Piper yields one AudioChunk per sentence
-        internally; we wrap each as a self-contained WAV so the client
-        can start playback on the first sentence."""
+        """One WAV chunk per sentence. Inference runs off the event loop so
+        VAD, barge-in and LLM token reads keep flowing while a segment renders."""
         if not self._piper or not text:
             return
         t0 = time.perf_counter()
-        # Piper inference is synchronous CPU work (50-900ms per segment).
-        # Run it off the event loop so VAD, barge_in and LLM token reads
-        # keep flowing while a segment renders.
-        chunks = await asyncio.to_thread(
-            lambda: list(self._piper.synthesize(text)))
-        t_synth = time.perf_counter()
+        chunks = await asyncio.to_thread(lambda: list(self._piper.synthesize(text)))
+        t_synth = (time.perf_counter() - t0) * 1000
         for idx, ac in enumerate(chunks):
-            wav = _pcm_to_wav(ac.audio_int16_bytes, self._sample_rate)
-            audio_secs = len(ac.audio_int16_bytes) / 2 / self._sample_rate
-            print(f"[tts stream] piper chunk={idx} "
-                  f"synth={(t_synth-t0)*1000:.0f}ms "
-                  f"audio={audio_secs*1000:.0f}ms bytes={len(wav)}")
-            yield wav
-        print(f"[tts stream] done total={int((time.perf_counter()-t0)*1000)}ms "
-              f"chunks={len(chunks)} chars={len(text)}")
+            audio_ms = len(ac.audio_int16_bytes) / 2 / self._sample_rate * 1000
+            print(f"[tts stream] piper chunk={idx} synth={t_synth:.0f}ms audio={audio_ms:.0f}ms")
+            yield _pcm_to_wav(ac.audio_int16_bytes, self._sample_rate)
