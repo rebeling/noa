@@ -36,7 +36,7 @@ async def drain_until_waiting(ws, t0: float, timeout: float) -> tuple[int, float
         remaining = timeout - (time.perf_counter() - t0)
         try:
             msg = await asyncio.wait_for(ws.recv(), timeout=remaining)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print("  (timeout)")
             break
         dt = (time.perf_counter() - t0) * 1000
