@@ -39,7 +39,7 @@ class DialogueService:
         t0 = time.perf_counter()
         try:
             await self._get_llm().warmup()
-            print(f"[llm warmup] {(time.perf_counter() - t0)*1000:.0f}ms")
+            print(f"[llm warmup] {(time.perf_counter() - t0) * 1000:.0f}ms")
         except Exception as e:  # noqa: BLE001
             print(f"[llm warmup] failed: {e}")
 
@@ -48,6 +48,6 @@ class DialogueService:
         if self._llm is not None:
             self._llm.set_language(language)
 
-    async def respond_stream(self, user_text: str) -> AsyncGenerator[str, None]:
+    async def respond_stream(self, user_text: str) -> AsyncGenerator[str]:
         async for chunk in self._get_llm().respond_stream(user_text):
             yield chunk

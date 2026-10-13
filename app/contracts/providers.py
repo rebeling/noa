@@ -39,7 +39,7 @@ class LLMProvider(ABC):
         """Switch the reply language mid-session, keeping history."""
 
     @abstractmethod
-    def respond_stream(self, user_text: str) -> AsyncGenerator[str, None]:
+    def respond_stream(self, user_text: str) -> AsyncGenerator[str]:
         """Yield reply text chunks for `user_text`."""
 
 
@@ -55,5 +55,5 @@ class TTSProvider(ABC):
         """Run a tiny synthesis so the first real call is fast."""
 
     @abstractmethod
-    def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
+    def synthesize_stream(self, text: str) -> AsyncGenerator[bytes]:
         """Yield self-contained WAV chunks for `text` as they are rendered."""

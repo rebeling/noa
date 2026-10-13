@@ -24,7 +24,7 @@ def split_segment(buffer: str, first: bool) -> tuple[str | None, str]:
             match = clause
     if match is None:
         return None, buffer
-    return buffer[:match.end()].strip(), buffer[match.end():]
+    return buffer[: match.end()].strip(), buffer[match.end() :]
 
 
 _GREETINGS = {

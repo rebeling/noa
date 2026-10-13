@@ -25,13 +25,8 @@
     </div>
     <div class="debug-group">
       <div class="debug-label">User: <b>{{ current_user }}</b> &middot; role: <b>{{ current_role }}</b></div>
-      <input id="user-input" type="text" value="{{ current_user }}"
-             placeholder="user id"
-             style="background:rgba(255,255,255,0.06);border:1px solid rgba(160,180,200,0.3);
-                    color:#e6eef5;border-radius:4px;padding:3px 6px;width:120px;font-size:12px;">
-      <select id="role-input"
-              style="background:rgba(255,255,255,0.06);border:1px solid rgba(160,180,200,0.3);
-                     color:#e6eef5;border-radius:4px;padding:3px 6px;font-size:12px;">
+      <input id="user-input" class="debug-field" type="text" value="{{ current_user }}" placeholder="user id">
+      <select id="role-input" class="debug-field">
         <option value="admin" {% if current_role == 'admin' %}selected{% endif %}>admin</option>
         <option value="customer" {% if current_role == 'customer' %}selected{% endif %}>customer</option>
       </select>
@@ -69,16 +64,10 @@
 
   <div class="transcript-drawer" id="transcript"></div>
 
-  <div id="text-bar"
-       style="position:fixed;left:0;right:0;bottom:0;display:flex;gap:8px;
-              padding:10px 14px;background:rgba(10,16,24,0.85);
-              backdrop-filter:blur(6px);border-top:1px solid rgba(160,180,200,0.18);">
+  <div id="text-bar">
     <input id="text-input" type="text" autocomplete="off"
            placeholder="Tap the orb to connect, then type or speak…"
-           onkeydown="if(event.key==='Enter')sendText(event)"
-           style="flex:1;background:rgba(255,255,255,0.06);
-                  border:1px solid rgba(160,180,200,0.3);color:#e6eef5;
-                  border-radius:6px;padding:8px 10px;font-size:14px;outline:none;">
+           onkeydown="if(event.key==='Enter')sendText(event)">
     <button class="debug-btn" onclick="sendText()">Send</button>
   </div>
 </div>

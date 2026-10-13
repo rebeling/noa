@@ -229,6 +229,24 @@
     cursor: pointer; text-align: left; border-radius: 4px;
   }
   .debug-btn:hover { background: rgba(255,255,255,0.1); border-color: rgba(160,180,200,0.5); }
+  .debug-field {
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(160,180,200,0.3);
+    color: #e6eef5; border-radius: 4px; padding: 3px 6px; font-size: 12px;
+  }
+  #user-input { width: 120px; }
+
+  /* Typed input, fixed to the bottom edge. */
+  #text-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    display: flex; gap: 8px; padding: 10px 14px;
+    background: rgba(10,16,24,0.85); backdrop-filter: blur(6px);
+    border-top: 1px solid rgba(160,180,200,0.18);
+  }
+  #text-input {
+    flex: 1; background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(160,180,200,0.3); color: #e6eef5;
+    border-radius: 6px; padding: 8px 10px; font-size: 14px; outline: none;
+  }
 
   /* Bounded transcript lane. Newer messages sit low in the lane while
      the controls below remain outside the message region. */

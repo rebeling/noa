@@ -2,6 +2,8 @@
 
 A voice assistant you talk to in the browser. Tap the orb, speak, get a spoken answer. Interrupt it any time.
 
+![Noa's orb, waiting to be tapped](docs/orb.png)
+
 All speech runs on your Mac: Silero detects when you talk, Parakeet transcribes it, Piper speaks the reply. Only the language model is a cloud call (OpenAI or Anthropic).
 
 ## Requirements

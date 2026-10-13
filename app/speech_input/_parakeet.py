@@ -63,9 +63,9 @@ class ParakeetASR(ASRProvider):
         dt_decode = time.perf_counter() - t_pre
         kind = "partial" if partial else "final "
         print(
-            f"[asr {kind}] {dt_total*1000:6.0f}ms total "
-            f"(decode {dt_decode*1000:5.0f}ms) "
-            f"audio={audio_secs:.2f}s RTF={dt_total/max(audio_secs,0.01):.2f} "
+            f"[asr {kind}] {dt_total * 1000:6.0f}ms total "
+            f"(decode {dt_decode * 1000:5.0f}ms) "
+            f"audio={audio_secs:.2f}s RTF={dt_total / max(audio_secs, 0.01):.2f} "
             f"chars={len(text)}"
         )
         return text.strip()

@@ -21,3 +21,10 @@ dependencies = [
     "anthropic>=0.107.0",
     "pysilero-vad>=3.4.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

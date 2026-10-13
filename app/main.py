@@ -22,7 +22,7 @@ async def lifespan(app_: FastAPI):
     t0 = time.perf_counter()
     try:
         await asyncio.to_thread(shared_tts.warmup)
-        print(f"[boot] TTS preloaded in {(time.perf_counter()-t0)*1000:.0f}ms")
+        print(f"[boot] TTS preloaded in {(time.perf_counter() - t0) * 1000:.0f}ms")
     except Exception as e:  # noqa: BLE001
         print(f"[boot] TTS preload failed: {e}")
     app_.state.shared_tts = shared_tts

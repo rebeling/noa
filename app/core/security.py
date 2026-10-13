@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 from fastapi import HTTPException, status
@@ -13,7 +13,7 @@ _BCRYPT_MAX_BYTES = 72
 
 
 def create_access_token(subject: str, role: str = "customer") -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(UTC) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {"exp": expire, "sub": subject, "role": role}
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
@@ -23,7 +23,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     try:
         pw = plain_password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
         return bcrypt.checkpw(pw, hashed_password.encode("utf-8"))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False
 
 
@@ -42,8 +42,8 @@ def decode_token(token: str) -> TokenPayload:
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         token_data = TokenPayload(**payload)
-    except (JWTError, ValidationError):
-        raise credentials_exc
+    except JWTError, ValidationError:
+        raise credentials_exc from None
     if token_data.sub is None:
         raise credentials_exc
     return token_data

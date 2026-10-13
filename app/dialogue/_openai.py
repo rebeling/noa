@@ -20,7 +20,7 @@ class OpenAILLM(LLMProvider):
     def set_language(self, language: str) -> None:
         self._history[0] = {"role": "system", "content": system_prompt(language)}
 
-    async def respond_stream(self, user_text: str) -> AsyncGenerator[str, None]:
+    async def respond_stream(self, user_text: str) -> AsyncGenerator[str]:
         self._history.append({"role": "user", "content": user_text})
         log_llm_request(self._history)
         stream = await self._client.chat.completions.create(

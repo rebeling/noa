@@ -36,8 +36,10 @@ class KokoroTTS(TTSProvider):
             from kokoro_onnx import Kokoro
 
             self._kokoro = Kokoro(model_path, voices_path)
-            print(f"[tts init] Kokoro loaded in {(time.perf_counter()-t0)*1000:.0f}ms "
-                  f"voice={voice} speed={speed}")
+            print(
+                f"[tts init] Kokoro loaded in {(time.perf_counter() - t0) * 1000:.0f}ms "
+                f"voice={voice} speed={speed}"
+            )
         except Exception as e:  # noqa: BLE001
             print(f"[tts] Kokoro init failed: {e} — run `make kokoro`")
 
@@ -49,9 +51,9 @@ class KokoroTTS(TTSProvider):
             return
         t0 = time.perf_counter()
         self._kokoro.create("hi.", voice=self._voice, speed=self._speed, lang="en-us")
-        print(f"[tts warmup] {(time.perf_counter()-t0)*1000:.0f}ms")
+        print(f"[tts warmup] {(time.perf_counter() - t0) * 1000:.0f}ms")
 
-    async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
+    async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes]:
         if not self._kokoro or not text:
             return
         t0 = time.perf_counter()
@@ -60,7 +62,9 @@ class KokoroTTS(TTSProvider):
             text, voice=self._voice, speed=self._speed, lang="en-us"
         ):
             audio_ms = len(samples) / sample_rate * 1000
-            print(f"[tts stream] kokoro chunk={idx} "
-                  f"since_start={(time.perf_counter()-t0)*1000:.0f}ms audio={audio_ms:.0f}ms")
+            print(
+                f"[tts stream] kokoro chunk={idx} "
+                f"since_start={(time.perf_counter() - t0) * 1000:.0f}ms audio={audio_ms:.0f}ms"
+            )
             idx += 1
             yield _samples_to_wav(samples, sample_rate)

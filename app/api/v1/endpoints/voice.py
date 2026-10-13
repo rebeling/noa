@@ -29,7 +29,8 @@ async def voice_websocket(
     # sub and role are logged only; nothing in the voice path is role-gated.
     try:
         await orchestrator.run_session(
-            websocket, language=lang, user_id=payload.sub, role=payload.role)
+            websocket, language=lang, user_id=payload.sub, role=payload.role
+        )
     except WebSocketDisconnect:
         print("Client disconnected")
     except Exception as e:

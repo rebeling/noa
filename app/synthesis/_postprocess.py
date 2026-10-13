@@ -29,16 +29,16 @@ import re
 _MAX_SPEECH_CHARS = 600
 
 # Markdown / markup patterns, applied in order.
-_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)      # ```code block```
-_INLINE_CODE_RE = re.compile(r"`([^`]*)`")                # `code`
-_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")           # ![alt](url)
-_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")           # [text](url) -> text
-_URL_RE = re.compile(r"https?://\S+|www\.\S+")            # bare URLs
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)  # ```code block```
+_INLINE_CODE_RE = re.compile(r"`([^`]*)`")  # `code`
+_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")  # ![alt](url)
+_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")  # [text](url) -> text
+_URL_RE = re.compile(r"https?://\S+|www\.\S+")  # bare URLs
 _EMPHASIS_RE = re.compile(r"(\*{1,3}|_{1,3})(\S.*?\S|\S)\1")  # **b** *i* _x_
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)  # # heading
-_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)    # > quote
+_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)  # > quote
 _BULLET_RE = re.compile(r"^\s*([-*+]|\d+[.)])\s+", re.MULTILINE)  # - item / 1. item
-_STRAY_MARKUP_RE = re.compile(r"[*_`~#>|]+")              # leftover markup chars
+_STRAY_MARKUP_RE = re.compile(r"[*_`~#>|]+")  # leftover markup chars
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # control chars
 _WS_RE = re.compile(r"\s+")
 # Sentence boundary: punctuation followed by whitespace or end-of-string.

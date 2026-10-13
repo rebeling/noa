@@ -40,8 +40,10 @@ class PiperTTS(TTSProvider):
 
             self._piper = PiperVoice.load(model_path)
             self._sample_rate = self._piper.config.sample_rate
-            print(f"[tts init] Piper loaded in {(time.perf_counter()-t0)*1000:.0f}ms "
-                  f"model={model_path} sr={self._sample_rate}")
+            print(
+                f"[tts init] Piper loaded in {(time.perf_counter() - t0) * 1000:.0f}ms "
+                f"model={model_path} sr={self._sample_rate}"
+            )
         except Exception as e:  # noqa: BLE001
             print(f"[tts] Piper init failed: {e}")
 
@@ -53,9 +55,9 @@ class PiperTTS(TTSProvider):
             return
         t0 = time.perf_counter()
         list(self._piper.synthesize("hi."))
-        print(f"[tts warmup] {(time.perf_counter()-t0)*1000:.0f}ms")
+        print(f"[tts warmup] {(time.perf_counter() - t0) * 1000:.0f}ms")
 
-    async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
+    async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes]:
         """One WAV chunk per sentence. Inference runs off the event loop so
         VAD, barge-in and LLM token reads keep flowing while a segment renders."""
         if not self._piper or not text:

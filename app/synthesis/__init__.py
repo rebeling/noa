@@ -53,6 +53,6 @@ class SynthesisService:
     def warmup(self) -> None:
         self._get_tts().warmup()
 
-    async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes, None]:
+    async def synthesize_stream(self, text: str) -> AsyncGenerator[bytes]:
         async for chunk in self._get_tts().synthesize_stream(text):
             yield chunk

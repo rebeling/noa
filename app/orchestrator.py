@@ -14,12 +14,12 @@ import time
 from fastapi import WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from app.contracts import AudioChunk, PartialTranscript, SpeechStarted, TurnEnded
+from app import _turn_text as turn_text
 from app.bus import EventBus
+from app.contracts import AudioChunk, PartialTranscript, SpeechStarted, TurnEnded
 from app.dialogue import DialogueService
 from app.speech_input import SpeechInputService
 from app.synthesis import SynthesisService, postprocess_for_speech
-from app import _turn_text as turn_text
 
 # How often the background partial-transcribe loop runs. 0.25s keeps
 # partials snappy; Parakeet decodes a window in ~150-500ms on the Apple
@@ -59,18 +59,19 @@ def _is_open(ws) -> bool:
     return ws.client_state == WebSocketState.CONNECTED
 
 
-async def _safe_send_text(ws, payload: str) -> None:
+async def _send(ws, message: dict) -> None:
+    """Send a JSON control message; drop it silently if the socket is closed."""
     if _is_open(ws):
         try:
-            await ws.send_text(payload)
+            await ws.send_text(json.dumps(message))
         except Exception as e:  # noqa: BLE001
-            print(f"ws send_text dropped: {e}")
+            print(f"ws send dropped: {e}")
 
 
-async def _safe_send_bytes(ws, payload: bytes) -> None:
+async def _send_audio(ws, wav: bytes) -> None:
     if _is_open(ws):
         try:
-            await ws.send_bytes(payload)
+            await ws.send_bytes(wav)
         except Exception as e:  # noqa: BLE001
             print(f"ws send_bytes dropped: {e}")
 
@@ -105,8 +106,10 @@ class DialogueOrchestrator:
         else:
             synthesis = SynthesisService(language=language)
             using_shared = False
-        print(f"session: reply_mode={_REPLY_MODE} language={language} "
-              f"user_id={user_id} role={role} shared_tts={using_shared}")
+        print(
+            f"session: reply_mode={_REPLY_MODE} language={language} "
+            f"user_id={user_id} role={role} shared_tts={using_shared}"
+        )
         # session language is mutable via set_language; capture in a holder
         # the closures read so a mid-session switch reaches the greeting pool.
         session_lang = language
@@ -117,16 +120,18 @@ class DialogueOrchestrator:
             # the frozen prefix from prior windows that fell out of the
             # sliding window — sent so the client renders the whole
             # turn, not only the last 6s.
-            await _safe_send_text(websocket, json.dumps({
-                "type": "user_transcript_chunk",
-                "committed": committed_text,
-                "tail": event.text,
-            }))
+            await _send(
+                websocket,
+                {
+                    "type": "user_transcript_chunk",
+                    "committed": committed_text,
+                    "tail": event.text,
+                },
+            )
 
         async def on_speech_started(event: SpeechStarted) -> None:
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Listening..."}))
-            await _safe_send_text(websocket, json.dumps({"type": "stop_audio"}))
+            await _send(websocket, {"type": "status", "text": "Listening..."})
+            await _send(websocket, {"type": "stop_audio"})
 
         async def on_turn_ended(event: TurnEnded) -> None:
             # Fire-and-forget the reply task so on_turn_ended returns
@@ -134,11 +139,9 @@ class DialogueOrchestrator:
             nonlocal pending_reply, turn_end_t0
             text = event.transcript
             if not (text and len(text) > 1):
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "response", "text": "(no speech recognized)"}))
+                await _send(websocket, {"type": "response", "text": "(no speech recognized)"})
                 return
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "transcript", "text": text}))
+            await _send(websocket, {"type": "transcript", "text": text})
             # t0 = when the user stopped talking (vad_end). Typed input has
             # no vad_end, so it starts the clock now.
             t0 = turn_end_t0 if turn_end_t0 is not None else time.perf_counter()
@@ -157,16 +160,12 @@ class DialogueOrchestrator:
               2) response='ok' + Speaking... for _FAKE_SPEAKING_SECS
               3) Waiting
             Useful for testing barge-in plumbing offline."""
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Processing..."}))
+            await _send(websocket, {"type": "status", "text": "Processing..."})
             await asyncio.sleep(_FAKE_PROCESSING_SECS)
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "response", "text": "ok"}))
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Speaking..."}))
+            await _send(websocket, {"type": "response", "text": "ok"})
+            await _send(websocket, {"type": "status", "text": "Speaking..."})
             await asyncio.sleep(_FAKE_SPEAKING_SECS)
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Waiting..."}))
+            await _send(websocket, {"type": "status", "text": "Waiting..."})
 
         async def _echo_llm(text: str) -> str:
             """Mock LLM: wait 1.0–2.5s, return input verbatim.
@@ -176,8 +175,10 @@ class DialogueOrchestrator:
             delay = random.uniform(_ECHO_LLM_MIN_SECS, _ECHO_LLM_MAX_SECS)
             t0 = time.perf_counter()
             await asyncio.sleep(delay)
-            print(f"[llm echo] {(time.perf_counter()-t0)*1000:.0f}ms "
-                  f"(target={delay*1000:.0f}ms) chars={len(text)}")
+            print(
+                f"[llm echo] {(time.perf_counter() - t0) * 1000:.0f}ms "
+                f"(target={delay * 1000:.0f}ms) chars={len(text)}"
+            )
             return text
 
         async def _reply_with_tts(text: str, llm_stream_call, t0: float) -> None:
@@ -189,8 +190,7 @@ class DialogueOrchestrator:
             Producer splits the LLM token stream into sentences; consumer
             synthesizes each one the moment it is ready, so TTS for sentence
             N overlaps LLM generation of sentence N+1."""
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Processing..."}))
+            await _send(websocket, {"type": "status", "text": "Processing..."})
             t_llm_start = time.perf_counter()
 
             sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -208,7 +208,8 @@ class DialogueOrchestrator:
                         buffer += chunk
                         while True:
                             segment, buffer = turn_text.split_segment(
-                                buffer, first=not emitted_first)
+                                buffer, first=not emitted_first
+                            )
                             if segment is None:
                                 break
                             if segment:
@@ -231,22 +232,25 @@ class DialogueOrchestrator:
                     if not clean:
                         continue
                     if first_sentence:
-                        print(f"[trace] llm first sentence ready: "
-                              f"{(time.perf_counter() - t_llm_start)*1000:.0f}ms")
-                        await _safe_send_text(websocket, json.dumps(
-                            {"type": "status", "text": "Speaking..."}))
-                    await _safe_send_text(websocket, json.dumps(
-                        {"type": "response_chunk", "text": sentence + " "}))
+                        print(
+                            f"[trace] llm first sentence ready: "
+                            f"{(time.perf_counter() - t_llm_start) * 1000:.0f}ms"
+                        )
+                        await _send(websocket, {"type": "status", "text": "Speaking..."})
+                    await _send(websocket, {"type": "response_chunk", "text": sentence + " "})
                     async for audio_chunk in synthesis.synthesize_stream(clean):
                         if chunks == 0:
                             now = time.perf_counter()
-                            print(f"[trace] tts first_chunk: "
-                                  f"{(now - t_llm_start)*1000:.0f}ms after llm start")
-                            print(f"[turn ] stop_talking -> first_audio: "
-                                  f"{(now - t0)*1000:6.0f}ms")
+                            print(
+                                f"[trace] tts first_chunk: "
+                                f"{(now - t_llm_start) * 1000:.0f}ms after llm start"
+                            )
+                            print(
+                                f"[turn ] stop_talking -> first_audio: {(now - t0) * 1000:6.0f}ms"
+                            )
                         chunks += 1
                         total_bytes += len(audio_chunk)
-                        await _safe_send_bytes(websocket, audio_chunk)
+                        await _send_audio(websocket, audio_chunk)
                     first_sentence = False
 
             chunks = 0
@@ -261,11 +265,11 @@ class DialogueOrchestrator:
                 for task in (producer, consumer):
                     if not task.done():
                         task.cancel()
-            print(f"[turn ] full reply: {(time.perf_counter() - t0)*1000:.0f}ms "
-                  f"chunks={chunks} bytes={total_bytes}")
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Waiting..."}))
-
+            print(
+                f"[turn ] full reply: {(time.perf_counter() - t0) * 1000:.0f}ms "
+                f"chunks={chunks} bytes={total_bytes}"
+            )
+            await _send(websocket, {"type": "status", "text": "Waiting..."})
 
         async def _delayed_reply(text: str, t0: float) -> None:
             """Mode-switching wrapper. NOA_REPLY_MODE picks fake/echo/real.
@@ -273,13 +277,17 @@ class DialogueOrchestrator:
             barge-in cleanup (stop_audio + status=Listening)."""
             try:
                 if _REPLY_MODE == "real":
+
                     async def _real_stream(t):
                         async for chunk in dialogue.respond_stream(t):
                             yield chunk
+
                     await _reply_with_tts(text, _real_stream, t0)
                 elif _REPLY_MODE == "echo":
+
                     async def _echo_stream(t):
                         yield await _echo_llm(t)
+
                     await _reply_with_tts(text, _echo_stream, t0)
                 else:
                     await _fake_reply(text)
@@ -287,19 +295,18 @@ class DialogueOrchestrator:
                 # Barge-in: drop assistant audio on the client and go
                 # back to listening. stop_audio clears the WebAudio queue
                 # in voice.js's onmessage handler.
-                await _safe_send_text(websocket, json.dumps({"type": "stop_audio"}))
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "status", "text": "Listening..."}))
+                await _send(websocket, {"type": "stop_audio"})
+                await _send(websocket, {"type": "status", "text": "Listening..."})
                 raise
             except Exception as e:  # noqa: BLE001
                 # LLM/TTS failure (bad key, model 404, rate limit, ...):
                 # tell the client so it leaves Processing/Speaking instead
                 # of hanging, and keep the cause in the server log.
                 print(f"[reply] failed: {e!r}")
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "response", "text": "(reply failed — see server log)"}))
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "status", "text": "Waiting..."}))
+                await _send(
+                    websocket, {"type": "response", "text": "(reply failed — see server log)"}
+                )
+                await _send(websocket, {"type": "status", "text": "Waiting..."})
 
         bus.subscribe(PartialTranscript, on_partial)
         bus.subscribe(SpeechStarted, on_speech_started)
@@ -348,8 +355,9 @@ class DialogueOrchestrator:
                         freeze_end = commit_offset + _PARTIAL_SLIDE_STEP_BYTES
                         freeze_audio = bytes(audio_buffer[commit_offset:freeze_end])
                         t_f = time.perf_counter()
-                        frozen_txt = (await asyncio.to_thread(
-                            speech.transcribe, freeze_audio, True)).strip()
+                        frozen_txt = (
+                            await asyncio.to_thread(speech.transcribe, freeze_audio, True)
+                        ).strip()
                         dt_f = (time.perf_counter() - t_f) * 1000
                         if frozen_txt:
                             committed_text = (
@@ -358,23 +366,26 @@ class DialogueOrchestrator:
                                 else frozen_txt
                             )
                         commit_offset = freeze_end
-                        print(f"[part ] freeze {dt_f:5.0f}ms "
-                              f"frozen_chars={len(frozen_txt)} "
-                              f"committed_chars={len(committed_text)} "
-                              f"commit_offset={commit_offset}")
+                        print(
+                            f"[part ] freeze {dt_f:5.0f}ms "
+                            f"frozen_chars={len(frozen_txt)} "
+                            f"committed_chars={len(committed_text)} "
+                            f"commit_offset={commit_offset}"
+                        )
                     # Live snapshot: only the uncommitted segment, capped
                     # at window so decode time stays bounded.
                     live_start = max(commit_offset, buflen - _PARTIAL_WINDOW_BYTES)
                     snapshot = bytes(audio_buffer[live_start:])
                     t_p = time.perf_counter()
-                    txt = (await asyncio.to_thread(
-                        speech.transcribe, snapshot, True)).strip()
+                    txt = (await asyncio.to_thread(speech.transcribe, snapshot, True)).strip()
                     dt_p = (time.perf_counter() - t_p) * 1000
                     audio_ms = len(snapshot) / 32  # int16@16kHz -> ms
                     changed = bool(txt) and txt != last_partial
-                    print(f"[part ] {dt_p:5.0f}ms audio={audio_ms:.0f}ms "
-                          f"changed={changed} chars={len(txt)} "
-                          f"committed_chars={len(committed_text)}")
+                    print(
+                        f"[part ] {dt_p:5.0f}ms audio={audio_ms:.0f}ms "
+                        f"changed={changed} chars={len(txt)} "
+                        f"committed_chars={len(committed_text)}"
+                    )
                     last_partial_buflen = buflen
                     if changed:
                         last_partial = txt
@@ -388,29 +399,22 @@ class DialogueOrchestrator:
         # Greet once on session start so the user knows the pipeline is hot.
         async def _greet() -> None:
             phrase = turn_text.greeting(session_lang)
-            print(f"[greet] mode={_REPLY_MODE} lang={session_lang} "
-                  f"phrase={phrase!r}")
+            print(f"[greet] mode={_REPLY_MODE} lang={session_lang} phrase={phrase!r}")
             if _REPLY_MODE == "fake":
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "response", "text": phrase}))
-                await _safe_send_text(websocket, json.dumps(
-                    {"type": "status", "text": "Waiting..."}))
+                await _send(websocket, {"type": "response", "text": phrase})
+                await _send(websocket, {"type": "status", "text": "Waiting..."})
                 return
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "response", "text": phrase}))
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Speaking..."}))
+            await _send(websocket, {"type": "response", "text": phrase})
+            await _send(websocket, {"type": "status", "text": "Speaking..."})
             t0 = time.perf_counter()
             chunks = 0
             async for chunk in synthesis.synthesize_stream(phrase):
                 if chunks == 0:
-                    print(f"[greet] first_chunk {(time.perf_counter()-t0)*1000:.0f}ms")
+                    print(f"[greet] first_chunk {(time.perf_counter() - t0) * 1000:.0f}ms")
                 chunks += 1
-                await _safe_send_bytes(websocket, chunk)
-            print(f"[greet] stream_done {(time.perf_counter()-t0)*1000:.0f}ms "
-                  f"chunks={chunks}")
-            await _safe_send_text(websocket, json.dumps(
-                {"type": "status", "text": "Waiting..."}))
+                await _send_audio(websocket, chunk)
+            print(f"[greet] stream_done {(time.perf_counter() - t0) * 1000:.0f}ms chunks={chunks}")
+            await _send(websocket, {"type": "status", "text": "Waiting..."})
 
         # Warm the LLM connection while the greeting plays (real mode only —
         # fake/echo never call the API). Fire-and-forget; the first turn
@@ -511,14 +515,17 @@ class DialogueOrchestrator:
                         else last_partial
                     )
                     if provisional_text:
-                        await _safe_send_text(websocket, json.dumps(
-                            {"type": "transcript", "text": provisional_text,
-                             "provisional": True}))
-                        print(f"[turn ] vad_end -> partial_shown: "
-                              f"{(time.perf_counter()-turn_end_t0)*1000:.0f}ms "
-                              f"chars={len(provisional_text)} "
-                              f"(committed={len(committed_text)} "
-                              f"tail={len(last_partial)})")
+                        await _send(
+                            websocket,
+                            {"type": "transcript", "text": provisional_text, "provisional": True},
+                        )
+                        print(
+                            f"[turn ] vad_end -> partial_shown: "
+                            f"{(time.perf_counter() - turn_end_t0) * 1000:.0f}ms "
+                            f"chars={len(provisional_text)} "
+                            f"(committed={len(committed_text)} "
+                            f"tail={len(last_partial)})"
+                        )
                     final_audio = bytes(audio_buffer)
                     # Reuse last partial as final if:
                     #   - turn audio fits inside the partial sliding window
@@ -541,17 +548,22 @@ class DialogueOrchestrator:
                     )
                     if reuse:
                         text = last_partial
-                        print(f"[turn ] final_reuse_partial: skipped decode "
-                              f"(partial age={age*1000:.0f}ms chars={len(text)})")
+                        print(
+                            f"[turn ] final_reuse_partial: skipped decode "
+                            f"(partial age={age * 1000:.0f}ms chars={len(text)})"
+                        )
                     else:
                         t_final = time.perf_counter()
-                        text = (await asyncio.to_thread(
-                            speech.transcribe, final_audio, False)).strip()
-                        print(f"[turn ] final_transcribe: "
-                              f"{(time.perf_counter()-t_final)*1000:.0f}ms "
-                              f"audio={len(final_audio)/32000:.2f}s "
-                              f"(reuse=no fits={fits_window} "
-                              f"covered={covered} age={age*1000:.0f}ms)")
+                        text = (
+                            await asyncio.to_thread(speech.transcribe, final_audio, False)
+                        ).strip()
+                        print(
+                            f"[turn ] final_transcribe: "
+                            f"{(time.perf_counter() - t_final) * 1000:.0f}ms "
+                            f"audio={len(final_audio) / 32000:.2f}s "
+                            f"(reuse=no fits={fits_window} "
+                            f"covered={covered} age={age * 1000:.0f}ms)"
+                        )
                     await bus.publish(TurnEnded(transcript=text))
                     audio_buffer.clear()
                     last_partial = ""
@@ -569,6 +581,6 @@ class DialogueOrchestrator:
             except Exception as e:  # noqa: BLE001
                 print(f"Session error: {e}")
                 import traceback
+
                 traceback.print_exc()
                 break
-
