@@ -352,50 +352,30 @@
             else if(d.text==='Processing...'){ setState('processing'); }
             else if(d.text==='Speaking...'){ setState('speaking'); }
           }
+          else if(d.type==='pause_audio'){
+            // Someone spoke over Noa; hold playback until the server has
+            // judged whether it was a real interruption.
+            if (playbackCtx && playbackCtx.state === 'running') playbackCtx.suspend();
+          }
+          else if(d.type==='resume_audio'){
+            if (playbackCtx && playbackCtx.state === 'suspended') playbackCtx.resume();
+          }
           else if(d.type==='stop_audio'){
             audioQueue = [];
             if (currentSource) { try { currentSource.stop(); } catch(e) {} currentSource = null; }
             isQueuePlaying = false;
+            if (playbackCtx && playbackCtx.state === 'suspended') playbackCtx.resume();
             livePartialBubble = null;
             setState('listening'); bindMicAnalyser();
           }
         }
       };
 
-      // Barge-in: while the assistant is processing/speaking, watch mic
-      // RMS. If voice activity persists past _BARGE_VOICE_MS, send one
-      // barge_in to the server (cooldown until next state change).
-      // Threshold sized to ignore short backchannels ("ok", "hm", "yeah")
-      // — those run ~300–500ms. Real interruptions are usually 800ms+.
-      const _BARGE_RMS = 0.05;          // input level threshold
-      const _BARGE_VOICE_MS = 900;      // sustained voice to trigger
-      let _bargeVoiceMs = 0;
-      let _bargeCooldown = false;
+      // Mic frames stream to the server in every state. Interruptions are
+      // judged server-side from the transcript (pause_audio / resume_audio).
       processor.onaudioprocess=(e)=>{
         if(!(socket&&socket.readyState===WebSocket.OPEN)) return;
         const inp=e.inputBuffer.getChannelData(0);
-
-        // Barge-in detector (only when not in 'listening' state).
-        const interruptible = (auraState === 'processing' || auraState === 'speaking');
-        if (interruptible && !_bargeCooldown) {
-          let sum = 0;
-          for (let i=0;i<inp.length;i++){ const v=inp[i]; sum += v*v; }
-          const rms = Math.sqrt(sum / inp.length);
-          if (rms > _BARGE_RMS) {
-            _bargeVoiceMs += e.inputBuffer.duration * 1000;
-            if (_bargeVoiceMs >= _BARGE_VOICE_MS) {
-              socket.send(JSON.stringify({type:'barge_in'}));
-              _bargeCooldown = true;
-              _bargeVoiceMs = 0;
-            }
-          } else {
-            _bargeVoiceMs = 0;
-          }
-        } else {
-          _bargeVoiceMs = 0;
-          if (!interruptible) _bargeCooldown = false;
-        }
-
         const pcm=new Int16Array(inp.length);
         for(let i=0;i<inp.length;i++) pcm[i]=Math.max(-1,Math.min(1,inp[i]))*0x7FFF;
         socket.send(pcm.buffer);

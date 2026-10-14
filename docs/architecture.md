@@ -40,10 +40,19 @@ app/
 
 ## Barge-in
 
-The browser watches microphone level while the assistant is processing or
-speaking. Sustained voice for 900 ms sends a `barge_in` message. The server
-cancels the reply task, tells the client to drop queued audio, and returns
-to listening. The threshold ignores short backchannels like "ok" or "hm".
+The microphone stays open while Noa speaks. When the VAD hears speech over
+a running reply, the server sends `pause_audio` and the browser holds
+playback. The reply keeps generating in the background. At the end of that
+short turn the transcript decides:
+
+- Nothing, a stray character, or only backchannels ("ok", "mhm", "ja"):
+  `resume_audio`, playback continues where it stopped. Barks, coughs and
+  background noise land here.
+- Anything else: the reply is cancelled, `stop_audio` drops queued
+  playback, and the transcript is answered as a new turn.
+
+The pause lasts as long as the interruption plus 0.5 s of silence, so a
+rejected one costs about a second of silence, not a lost sentence.
 
 ## WebSocket protocol
 
@@ -52,7 +61,6 @@ Client to server: binary frames are PCM audio. Text frames are JSON:
 | type | fields | effect |
 | --- | --- | --- |
 | `set_language` | `language` | switch ASR, LLM and TTS language mid-session |
-| `barge_in` | | cancel the current reply |
 | `text_input` | `text` | run a turn from typed text, skipping VAD and ASR |
 
 Server to client: binary frames are WAV audio chunks. Text frames:
@@ -64,6 +72,8 @@ Server to client: binary frames are WAV audio chunks. Text frames:
 | `transcript` | `text`, `provisional` | the user's finished turn |
 | `response_chunk` | `text` | one spoken segment of the reply |
 | `response` | `text` | a complete reply (greeting, stub, error) |
+| `pause_audio` | | hold playback, someone spoke over the reply |
+| `resume_audio` | | continue playback, it was not an interruption |
 | `stop_audio` | | drop queued playback |
 
 ## Startup and latency

@@ -6,10 +6,13 @@ the API layer.
 """
 
 import asyncio
+import contextlib
+import io
 import json
 import os
 import random
 import time
+import wave
 
 from fastapi import WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -76,6 +79,15 @@ async def _send_audio(ws, wav: bytes) -> None:
             print(f"ws send_bytes dropped: {e}")
 
 
+def _wav_seconds(wav: bytes) -> float:
+    """Playback length of one WAV chunk; 0 if the header is unreadable."""
+    try:
+        with wave.open(io.BytesIO(wav)) as w:
+            return w.getnframes() / w.getframerate()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 class DialogueOrchestrator:
     """Builds the pipeline for one WebSocket session and runs it.
 
@@ -116,6 +128,8 @@ class DialogueOrchestrator:
 
         # --- event handlers: parts never call each other directly ---
         async def on_partial(event: PartialTranscript) -> None:
+            if interrupt_check:
+                return
             # event.text is the tail (last window). committed_text is
             # the frozen prefix from prior windows that fell out of the
             # sliding window — sent so the client renders the whole
@@ -129,15 +143,50 @@ class DialogueOrchestrator:
                 },
             )
 
+        def reply_busy() -> bool:
+            """A reply is generating, or the client is still playing one."""
+            generating = pending_reply is not None and not pending_reply.done()
+            return generating or time.perf_counter() < speaking_until
+
         async def on_speech_started(event: SpeechStarted) -> None:
+            # Speech over a running reply: pause playback and wait for the
+            # turn to end so the transcript can decide whether it was a
+            # real interruption or just noise / a backchannel.
+            nonlocal interrupt_check, pause_started
+            if reply_busy():
+                interrupt_check = True
+                pause_started = time.perf_counter()
+                await _send(websocket, {"type": "pause_audio"})
+                print("[turn ] speech during reply: paused, checking")
+                return
             await _send(websocket, {"type": "status", "text": "Listening..."})
             await _send(websocket, {"type": "stop_audio"})
 
         async def on_turn_ended(event: TurnEnded) -> None:
             # Fire-and-forget the reply task so on_turn_ended returns
-            # quickly and the receive loop stays free to read barge_in.
-            nonlocal pending_reply, turn_end_t0
+            # quickly and the receive loop keeps reading audio.
+            nonlocal pending_reply, turn_end_t0, interrupt_check, speaking_until
             text = event.transcript
+            if interrupt_check:
+                interrupt_check = False
+                if not turn_text.is_interruption(text):
+                    # Noise or "mhm": resume where Noa left off. Playback
+                    # ends later by however long it sat paused.
+                    speaking_until += time.perf_counter() - pause_started
+                    turn_end_t0 = None
+                    await _send(websocket, {"type": "resume_audio"})
+                    print(f"[turn ] interrupt rejected {text!r}: resumed")
+                    return
+                print(f"[turn ] interrupt accepted {text!r}")
+                speaking_until = 0.0
+                # Finish cancelling the old reply before the new one starts
+                # so its cleanup (stop_audio, Listening...) cannot land on
+                # top of the new reply's Processing... status.
+                if pending_reply is not None and not pending_reply.done():
+                    pending_reply.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pending_reply
+                await _send(websocket, {"type": "stop_audio"})
             if not (text and len(text) > 1):
                 await _send(websocket, {"type": "response", "text": "(no speech recognized)"})
                 return
@@ -222,7 +271,7 @@ class DialogueOrchestrator:
                     await sentence_queue.put(None)
 
             async def sentence_consumer():
-                nonlocal chunks, total_bytes
+                nonlocal chunks, total_bytes, speaking_until
                 first_sentence = True
                 while True:
                     sentence = await sentence_queue.get()
@@ -251,6 +300,9 @@ class DialogueOrchestrator:
                         chunks += 1
                         total_bytes += len(audio_chunk)
                         await _send_audio(websocket, audio_chunk)
+                        speaking_until = max(speaking_until, time.perf_counter()) + _wav_seconds(
+                            audio_chunk
+                        )
                     first_sentence = False
 
             chunks = 0
@@ -327,6 +379,11 @@ class DialogueOrchestrator:
         commit_offset = 0
         partial_task: asyncio.Task | None = None
         pending_reply: asyncio.Task | None = None
+        # Estimated moment the client finishes playing what we sent.
+        speaking_until = 0.0
+        # True from speech onset over a reply until its transcript is judged.
+        interrupt_check = False
+        pause_started = 0.0
         turn_start_t0: float | None = None
         turn_end_t0: float | None = None
 
@@ -429,7 +486,7 @@ class DialogueOrchestrator:
             print(f"greet failed: {e}")
 
         # Receive loop: binary frames are PCM audio, text frames are JSON
-        # control messages (set_language, barge_in, text_input).
+        # control messages (set_language, text_input).
         while True:
             try:
                 message = await websocket.receive()
@@ -459,13 +516,6 @@ class DialogueOrchestrator:
                                 else:
                                     synthesis.set_language(lang)
                                 print(f"language switched to {lang}")
-                        elif ctype == "barge_in":
-                            # Cancel the in-flight reply so the user can
-                            # speak again immediately.
-                            if pending_reply is not None and not pending_reply.done():
-                                pending_reply.cancel()
-                                pending_reply = None
-                                print("barge_in: cancelled pending reply")
                         elif ctype == "text_input":
                             # Typed message: skip VAD/ASR and drive the same
                             # reply path as a finished spoken turn.
@@ -514,7 +564,7 @@ class DialogueOrchestrator:
                         if committed_text
                         else last_partial
                     )
-                    if provisional_text:
+                    if provisional_text and not interrupt_check:
                         await _send(
                             websocket,
                             {"type": "transcript", "text": provisional_text, "provisional": True},

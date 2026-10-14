@@ -41,7 +41,7 @@ mic ──▶ VAD (Silero) ──▶ ASR (Parakeet) ──▶ LLM (streamed) ─
 
 - Speech ends after 0.5 s of silence, then the reply starts.
 - The LLM stream is cut into short segments and spoken as it arrives.
-- Speaking over the assistant stops it and starts a new turn.
+- Speaking over the assistant stops it and starts a new turn. Noise and a short "mhm" do not.
 - English and German. Toggle in the top-right corner.
 
 Details in [docs/architecture.md](docs/architecture.md).
